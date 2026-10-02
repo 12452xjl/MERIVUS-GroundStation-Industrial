@@ -31,6 +31,30 @@ Item {
     SwarmController {
        id: _swarm
     }
+    SwarmMissionOrchestrator {
+       id: _missionOrchestrator
+    }
+    FormationPlanner {
+       id: _formationPlanner
+    }
+    FaultToleranceManager {
+       id: _faultToleranceManager
+    }
+    Timer {
+       id: _fleetPolicyTimer
+       interval: 1000
+       repeat: true
+       running: true
+       onTriggered: {
+           var reports = _swarm.fleetRegistry ? _swarm.fleetRegistry.vehicles : []
+           for (var i = 0; i < reports.length; i++) {
+               var report = reports[i]
+               if (report && report.systemId) {
+                   _faultToleranceManager.reportVehicle(report)
+               }
+           }
+       }
+    }
     property var missionController
     property var confirmDialog
     property var actionList
@@ -38,10 +62,68 @@ Item {
     property var orbitMapCircle
     property var selectedVehicleIds: []
     property real defaultTakeoffAltitudeMeters: 10
+    property string activeSwarmTaskId: ""
+    onSelectedVehicleIdsChanged: _formationPlanner.memberIds = selectedVehicleIds
     readonly property bool swarmModeEnabled: _swarm.swarmModeEnabled
+    // Expose the single controller instance used by map and command-center
+    // views. Creating a second controller in the map would split formation
+    // state, watchdogs and temporary-mission bookkeeping.
+    readonly property var swarmController: _swarm
+    readonly property var swarmTransactions: _swarm.transactions
+    readonly property var fleetRegistry: _swarm.fleetRegistry
+    readonly property var fleetHealthSummary: _swarm.fleetRegistry.fleetHealthSummary
+    readonly property var missionOrchestrator: _missionOrchestrator
+    readonly property var formationPlanner: _formationPlanner
+    readonly property var faultToleranceManager: _faultToleranceManager
     readonly property bool formationActive: _swarm.formationActive
     readonly property bool formationBusy: _swarm.formationBusy
     readonly property string formationStatus: _swarm.formationStatus
+
+    Connections {
+        target: _swarm
+        function onFormationActiveChanged() {
+            if (!activeSwarmTaskId) return
+            if (_swarm.formationActive) {
+                _missionOrchestrator.setTaskProgress(activeSwarmTaskId, 0.5)
+            }
+        }
+        function onFormationFault(message) {
+            if (!activeSwarmTaskId) return
+            _missionOrchestrator.failTask(activeSwarmTaskId, message)
+            activeSwarmTaskId = ""
+        }
+    }
+
+    // Fault policy only changes the task assignment/state here. It never
+    // sends a flight command automatically; an operator or a dedicated
+    // command adapter must execute any resulting replan.
+    Connections {
+        target: _faultToleranceManager
+        function onVehicleOffline(systemId, reason, suggestedAction) {
+            if (!activeSwarmTaskId || !_missionOrchestrator.hasTask(activeSwarmTaskId)) return
+            var summary = _missionOrchestrator.taskSummary(activeSwarmTaskId)
+            if (!summary || summary.phase === "completed" || summary.phase === "cancelled" || summary.phase === "failed") return
+
+            var targets = summary.targetVehicleIds ? summary.targetVehicleIds.slice(0) : []
+            var filtered = []
+            for (var i = 0; i < targets.length; i++) {
+                if (Number(targets[i]) !== Number(systemId)) filtered.push(targets[i])
+            }
+
+            if (suggestedAction === "reassign" && filtered.length > 0) {
+                _missionOrchestrator.reassignTask(activeSwarmTaskId, filtered)
+            }
+            _missionOrchestrator.pauseTask(activeSwarmTaskId,
+                                           "vehicle_%1_%2".arg(systemId).arg(reason))
+        }
+        function onVehicleLowBattery(systemId, batteryPercent, suggestedAction) {
+            if (!activeSwarmTaskId || !_missionOrchestrator.hasTask(activeSwarmTaskId)) return
+            var summary = _missionOrchestrator.taskSummary(activeSwarmTaskId)
+            if (!summary || summary.phase === "completed" || summary.phase === "cancelled" || summary.phase === "failed") return
+            _missionOrchestrator.pauseTask(activeSwarmTaskId,
+                                           "vehicle_%1_low_battery_%2".arg(systemId).arg(Math.round(batteryPercent)))
+        }
+    }
 
     readonly property string emergencyStopTitle:            qsTr("EMERGENCY STOP")
     readonly property string armTitle:                      qsTr("Arm")
@@ -96,7 +178,7 @@ Item {
     readonly property string vtolTransitionMRMessage:           qsTr("Transition VTOL to multi-rotor flight.")
     readonly property string roiMessage:                        qsTr("Make the specified location a Region Of Interest.")
     readonly property string setHomeMessage:                    qsTr("Set vehicle home as the specified location. This will affect Return to Home position")
-    readonly property string swarmMessage:                     qsTr("按 PREPARE、COMMIT、RELEASE 三阶段启动所选 1/2/6 机；任一成员失败会自动向整组下发 ABORT。")
+    readonly property string swarmMessage:                     qsTr("按 PREPARE、COMMIT、RELEASE 三阶段启动所选 1-6 机；任一成员失败会自动向整组下发 ABORT。")
     readonly property string endSwarmMessage:                  qsTr("向当前会话成员下发 ABORT、停止位置租约，并等待成员进入悬停。")
 
     readonly property int actionRTL:                        1
@@ -237,6 +319,9 @@ Item {
 
         var lines = []
         if (result.message) lines.push(result.message)
+        if (result.transactionId) {
+            lines.push(qsTr("事务：%1（请继续观察 ACK/遥测状态）").arg(result.transactionId))
+        }
         if (dispatched.length > 0) {
             lines.push(qsTr("已下发：UAV-%1").arg(dispatched.join(", UAV-")))
         }
@@ -614,11 +699,15 @@ Item {
             break
         case actionSwarm:
             var formationIds = _actionData ? _actionData.slice(0).sort(function(a, b) { return a - b }) : []
-            var validCount = formationIds.length === 1 || formationIds.length === 2 || formationIds.length === 6
+            // The protocol supports any selected group from one to six
+            // vehicles.  A previous UI guard only admitted 1/2/6, which
+            // silently blocked valid 3-, 4-, and 5-vehicle sessions even
+            // though SwarmController accepts them.
+            var validCount = formationIds.length >= 1 && formationIds.length <= 6
             var validLeader = formationIds.length > 0 && Number(formationIds[0]) === 1
             var validSix = formationIds.length !== 6 || formationIds.join(",") === "1,2,3,4,5,6"
             if (!validCount || !validLeader || !validSix) {
-                mainWindow.showMessageDialog(qsTr("无法启动编队"), qsTr("请选择包含 UAV-1 的单机、双机或完整 UAV-1～UAV-6。"))
+                mainWindow.showMessageDialog(qsTr("无法启动编队"), qsTr("请选择包含 UAV-1 的 1～6 架无人机；若选择 6 架，必须为 UAV-1～UAV-6。"))
                 return
             }
             confirmDialog.title = swarmTitle
@@ -764,11 +853,29 @@ Item {
             _activeVehicle.doSetHome(actionData)
             break
         case actionSwarm:
+            var formationIds = actionData ? actionData : []
+            var formationTaskId = _missionOrchestrator.createTask(
+                        "formation", formationIds,
+                        { protocol: "prepare_commit_release", operatorConfirmed: true })
             result = _swarm.sendStartCommand(actionData ? actionData : [])
+            if (formationTaskId) {
+                if (result && result.ok) {
+                    _missionOrchestrator.startTask(formationTaskId)
+                    _missionOrchestrator.setTaskProgress(formationTaskId, 0.1)
+                    activeSwarmTaskId = formationTaskId
+                } else {
+                    _missionOrchestrator.failTask(formationTaskId,
+                                                   result && result.message ? result.message : "formation_dispatch_failed")
+                }
+            }
             _showBatchResult(qsTr("编队任务"), result, true)
             break
         case actionEndSwarm:
             result = _swarm.endFormationSession()
+            if (activeSwarmTaskId && result && result.ok) {
+                _missionOrchestrator.cancelTask(activeSwarmTaskId, "formation_stop_requested")
+                activeSwarmTaskId = ""
+            }
             _showBatchResult(qsTr("结束编队"), result, true)
             break
         case actionQueuedMission:

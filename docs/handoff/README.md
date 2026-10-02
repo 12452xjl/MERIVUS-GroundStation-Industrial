@@ -24,4 +24,12 @@ MERIVUS 是基于 QGroundControl Custom Build 的多无人机调度地面站。�
 - 可重复验证入口：[`docs/development`](../development/)
 - 版本历史：[`CHANGELOG.md`](../releases/CHANGELOG.md) 与 Git/PR 历史
 
+## 本批次交接入口
+
+- 集群地面站第一阶段工程师交接：[`MERIVUS_SWARM_ENGINEER_HANDOFF.md`](MERIVUS_SWARM_ENGINEER_HANDOFF.md)
+- 本批次源码文件与静态检查清单：[`MERIVUS_SWARM_PATCH_MANIFEST.md`](MERIVUS_SWARM_PATCH_MANIFEST.md)
+- 集群目标与当前缺口：[`MERIVUS_SWARM_TARGET_MATRIX.md`](../MERIVUS_SWARM_TARGET_MATRIX.md)
+
+交接文档只说明源码接手、编译、SITL/故障注入和放行边界，不替代工程师的真实硬件测试报告。
+
 阶段性排障记录、旧环境说明、账号迁移清单、源码全文副本和二进制说明书不再作为仓库长期文档；需要时从 Git 历史或对应任务记录恢复。

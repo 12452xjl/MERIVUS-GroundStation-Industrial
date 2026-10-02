@@ -26,9 +26,26 @@ import Merivus                     1.0
 FlightMap {
     id:                         _root
 
-    SwarmController {
-        id: swarmController
-    }
+    // Share the controller owned by GuidedActionsController. A second
+    // SwarmController here would create a separate watchdog/session state and
+    // make the map disagree with the command center.
+    readonly property var swarmController: globals.guidedControllerFlyView
+                                             ? globals.guidedControllerFlyView.swarmController
+                                             : null
+
+    // Shared fleet state is exposed by the controller so overlays can render
+    // health and capability summaries without reaching into QGC internals.
+    readonly property var fleetRegistry: swarmController ? swarmController.fleetRegistry : null
+    readonly property var fleetHealthSummary: fleetRegistry ? fleetRegistry.fleetHealthSummary : ({})
+    readonly property var missionOrchestrator: globals.guidedControllerFlyView
+                                                       ? globals.guidedControllerFlyView.missionOrchestrator
+                                                       : null
+    readonly property var formationPlanner: globals.guidedControllerFlyView
+                                                    ? globals.guidedControllerFlyView.formationPlanner
+                                                    : null
+    readonly property var faultToleranceManager: globals.guidedControllerFlyView
+                                                        ? globals.guidedControllerFlyView.faultToleranceManager
+                                                        : null
 
     QGCPalette { id: qgcPal; colorGroupEnabled: true }
 

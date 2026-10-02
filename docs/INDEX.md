@@ -35,6 +35,7 @@
 - [AI Intent Policy](architecture/AI_INTENT_POLICY.md)
 - [AI 问答与指令分离](architecture/AI_QA_INTENT_SEPARATION.md)
 - [AI 模型稳定性](architecture/AI_MODEL_STABILITY.md)
+- [MERIVUS 集群目标落地矩阵](MERIVUS_SWARM_TARGET_MATRIX.md)
 
 ## 设计决策
 

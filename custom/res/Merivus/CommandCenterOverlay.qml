@@ -46,6 +46,15 @@ Item {
     readonly property var focusVehicle: resolveFocusVehicle()
     readonly property var rightVehicle: resolveRightVehicle()
     readonly property var guidedController: globals.guidedControllerFlyView
+    readonly property var fleetHealth: guidedController && guidedController.fleetHealthSummary
+                                      ? guidedController.fleetHealthSummary
+                                      : ({ state: "unknown", score: 0, onlineVehicleCount: 0, vehicleCount: 0 })
+    readonly property var missionSummary: guidedController && guidedController.missionOrchestrator
+                                          ? guidedController.missionOrchestrator.fleetSummary
+                                          : ({ taskCount: 0, runningCount: 0 })
+    readonly property var faultRecommendations: guidedController && guidedController.faultToleranceManager
+                                                ? guidedController.faultToleranceManager.recommendations
+                                                : []
 
     property real leftPanelTopExtra: 3
     property real rightPanelTopExtra: 3
@@ -108,6 +117,20 @@ Item {
     }
 
     function selectedCount() { return selectedIds ? selectedIds.length : 0 }
+
+    function fleetHealthText() {
+        if (!fleetHealth || fleetHealth.state === "unknown") return tr("待收集")
+        if (fleetHealth.state === "critical") return tr("严重")
+        if (fleetHealth.state === "degraded") return tr("降级")
+        return tr("健康")
+    }
+
+    function fleetHealthColor() {
+        if (!fleetHealth || fleetHealth.state === "unknown") return root.muted
+        if (fleetHealth.state === "critical") return qgcPal.colorRed
+        if (fleetHealth.state === "degraded") return qgcPal.colorOrange
+        return root.nominal
+    }
 
     function selectedSummary() {
         if (selectedCount() === 0) {
@@ -295,10 +318,11 @@ function escFact(vehicle, prefix, motorIndex) {
     function selectedIdsSnapshot() { return selectedIds ? selectedIds.slice(0) : [] }
 
     function hasValidFormationSelection() {
-        if (!selectedIds || (selectedIds.length !== 1 && selectedIds.length !== 2 && selectedIds.length !== 6)) return false
+        if (!selectedIds || selectedIds.length < 1 || selectedIds.length > 6) return false
         var sorted = selectedIdsSnapshot().sort(function(a, b) { return Number(a) - Number(b) })
         if (Number(sorted[0]) !== 1) return false
-        return sorted.length !== 6 || sorted.join(",") === "1,2,3,4,5,6"
+        if (sorted.length === 6 && sorted.join(",") !== "1,2,3,4,5,6") return false
+        return !guidedController.formationPlanner || guidedController.formationPlanner.minimumSpacingValid()
     }
 
     function showFloatingToolTip(sourceItem, text, align) {
@@ -561,6 +585,51 @@ function escFact(vehicle, prefix, motorIndex) {
                 color: root.guidedController && root.guidedController.swarmModeEnabled ? root.nominal : qgcPal.colorOrange
                 font.pointSize: root.fontPointSize(11)
                 font.bold: true
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 36
+                radius: 7
+                color: Qt.rgba(root.fleetHealthColor().r, root.fleetHealthColor().g,
+                               root.fleetHealthColor().b, 0.12)
+                border.color: root.fleetHealthColor()
+                border.width: 1
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 10
+                    spacing: 8
+
+                    QGCLabel {
+                        text: tr("舰队基础健康")
+                        color: qgcPal.text
+                        font.bold: true
+                        font.pointSize: root.fontPointSize(11)
+                    }
+                    QGCLabel {
+                        text: root.fleetHealthText()
+                        color: root.fleetHealthColor()
+                        font.bold: true
+                        font.pointSize: root.fontPointSize(11)
+                    }
+                    QGCLabel {
+                        Layout.fillWidth: true
+                        horizontalAlignment: Text.AlignRight
+                        text: root.fleetHealth
+                              ? tr("%1/%2 在线 · %3 分 · %4 个运行任务 · %5 条建议")
+                                  .arg(root.fleetHealth.onlineVehicleCount || 0)
+                                  .arg(root.fleetHealth.vehicleCount || 0)
+                                  .arg(root.fleetHealth.score || 0)
+                                  .arg(root.missionSummary.runningCount || 0)
+                                  .arg(root.faultRecommendations ? root.faultRecommendations.length : 0)
+                              : tr("等待车辆状态")
+                        color: qgcPal.colorGrey
+                        font.pointSize: root.fontPointSize(10)
+                        elide: Text.ElideRight
+                    }
+                }
             }
 
             GridLayout {

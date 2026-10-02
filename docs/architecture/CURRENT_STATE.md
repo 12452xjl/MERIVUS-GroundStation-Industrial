@@ -20,6 +20,11 @@ MERIVUS 已从早期界面原型进入“可构建、可本地联调、具备明
 - 自定义主窗口、工具栏、地图、飞行控制和环境姿态视频区域。
 - 多机列表、焦点飞行器、链路、遥测、电池、GPS、ESC 和任务信息展示。
 - 飞行视图与设置页面共享的全局 AI 悬浮入口。
+- MERIVUS 集群控制第一阶段模块：`FleetRegistry`、`CommandTransaction`、
+  `SwarmMissionOrchestrator`、`FormationPlanner` 和 `FaultToleranceManager`。
+- 人工批量起飞/降落/返航/直接指点与编队阶段使用事务 ID；完成状态分别由 MAVLink ACK
+  或飞行模式遥测确认，不能把“已发送”当作“已完成”。
+- 地图、指挥中心和 Guided Actions 共享同一个 `SwarmController` 实例；多机列表保持可见。
 
 ### AI Assistant
 

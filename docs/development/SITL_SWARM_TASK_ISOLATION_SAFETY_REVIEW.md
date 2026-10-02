@@ -2,7 +2,7 @@
 
 ## Command
 
-- Intent/action: 单机、双机、六机使用同一编队事务；批量起飞/降落/标准返航；普通右键 goto；Shift 临时多航点 Mission。
+- Intent/action: 1～6 机使用同一编队事务；批量起飞/降落/标准返航；普通右键 goto；Shift 临时多航点 Mission。
 - Risk class: 高。
 - Target source: 地图框选或排他单选。
 - Frozen target system IDs: 编队成员在 PREPARE 前冻结，必须包含 UAV-1；Shift 任务在首个航点时冻结。
@@ -36,11 +36,11 @@
 
 ## Verification
 
-- Mock/SITL scenario: 单机、双机、六机四阶段事务；批量动作、跨机独立任务、Shift 替换和完成清理。
+- Mock/SITL scenario: 1～6 机四阶段事务；批量动作、跨机独立任务、Shift 替换和完成清理。
 - Fault injection: 错误成员位图、过期会话、部分 ACK 丢失、PREPARE/COMMIT/RELEASE 拒绝、任一成员断链、地面站退出、Mission 上传/清理失败。
 - Audit record: 当前为 UI 结果与日志；尚未接统一持久审计。
 - Rollback/abort: 任一事务阶段失败或“结束编队”都会停止位置租约，向冻结成员发送 USER_4 ABORT，并等待 AUTO_LOITER ACK。
-- Reviewer decision: 采用协议版本 `2`；单机、双机、六机必须依次完成验证，不得以静态检查代替 SITL 和实机放行。
+- Reviewer decision: 采用协议版本 `2`；1～6 机必须依次完成验证，不得以静态检查代替 SITL 和实机放行。
 
 ## Remaining risks
 

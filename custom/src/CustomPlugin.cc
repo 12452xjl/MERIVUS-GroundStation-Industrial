@@ -26,6 +26,11 @@
 #include "AiAgentClient.h"
 #include "AiServiceSupervisor.h"
 #include "Diagnostics/MerivusLinkDiagnostics.h"
+#include "CommandTransaction.h"
+#include "FaultToleranceManager.h"
+#include "FormationPlanner.h"
+#include "FleetRegistry.h"
+#include "SwarmMissionOrchestrator.h"
 #include "SwarmController.h"
 
 QGC_LOGGING_CATEGORY(CustomLog, "CustomLog")
@@ -36,10 +41,12 @@ CustomFlyViewOptions::CustomFlyViewOptions(CustomOptions* options, QObject* pare
 
 }
 
-// This custom build does not support conecting multiple vehicles to it. This in turn simplifies various parts of the QGC ui.
+// MERIVUS uses the QGroundControl multi-vehicle model as the source of truth
+// for fleet discovery and batch operations. Keep the standard vehicle list
+// visible so operators can inspect and select individual members.
 bool CustomFlyViewOptions::showMultiVehicleList(void) const
 {
-    return false;
+    return true;
 }
 
 // This custom build has it's own custom instrument panel. Don't show regular one.
@@ -81,6 +88,11 @@ CustomPlugin::CustomPlugin(QGCApplication *app, QGCToolbox* toolbox)
     qmlRegisterType<AiAgentClient>("Merivus", 1, 0, "AiAgentClient");
     qmlRegisterType<AiServiceSupervisor>("Merivus", 1, 0, "AiServiceSupervisor");
     qmlRegisterType<MerivusLinkDiagnostics>("Merivus", 1, 0, "MerivusLinkDiagnostics");
+    qmlRegisterType<CommandTransaction>("Merivus", 1, 0, "CommandTransaction");
+    qmlRegisterType<FaultToleranceManager>("Merivus", 1, 0, "FaultToleranceManager");
+    qmlRegisterType<FormationPlanner>("Merivus", 1, 0, "FormationPlanner");
+    qmlRegisterType<FleetRegistry>("Merivus", 1, 0, "FleetRegistry");
+    qmlRegisterType<SwarmMissionOrchestrator>("Merivus", 1, 0, "SwarmMissionOrchestrator");
     qmlRegisterType<SwarmController>("Merivus", 1, 0, "SwarmController");
     _options = new CustomOptions(this, this);
     _showAdvancedUI = false;
@@ -468,5 +480,3 @@ QQmlApplicationEngine* CustomPlugin::createQmlApplicationEngine(QObject* parent)
     qmlEngine->addImportPath("qrc:/Custom/Widgets");
     return qmlEngine;
 }
-
-

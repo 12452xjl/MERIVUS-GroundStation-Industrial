@@ -1,8 +1,10 @@
 #include "SwarmController.h"
 
+#include <QDateTime>
 #include <QPointer>
 #include <QRandomGenerator>
 #include <QSet>
+#include <QStringList>
 #include <QTimer>
 #include <QtAlgorithms>
 
@@ -27,6 +29,10 @@ const double SwarmController::kDefaultMissionAltitudeMeters = 20.0;
 SwarmController::SwarmController(QObject* parent)
     : QObject(parent)
 {
+    _fleetRegistry = new FleetRegistry(this);
+    _fleetRegistryTimer.setInterval(1000);
+    connect(&_fleetRegistryTimer, &QTimer::timeout, this, &SwarmController::_refreshFleetRegistry);
+
     _formationWatchdogTimer.setInterval(500);
     connect(&_formationWatchdogTimer, &QTimer::timeout, this, &SwarmController::_checkFormationHealth);
 
@@ -35,6 +41,105 @@ SwarmController::SwarmController(QObject* parent)
 
     _temporaryMissionTimer.setInterval(500);
     connect(&_temporaryMissionTimer, &QTimer::timeout, this, &SwarmController::_checkTemporaryMissionProgress);
+
+    // Command transactions are deliberately checked from telemetry as well as
+    // MAVLink ACKs.  Guided land/RTL may use SET_MODE (which has no ACK on
+    // some PX4 versions), so a mode transition is the only honest completion
+    // signal for those operations.
+    _commandTransactionTimer.setInterval(250);
+    connect(&_commandTransactionTimer, &QTimer::timeout, this, &SwarmController::_checkCommandTransactions);
+    _commandTransactionTimer.start();
+
+    _refreshFleetRegistry();
+    _fleetRegistryTimer.start();
+}
+
+void SwarmController::_refreshFleetRegistry()
+{
+    if (!_fleetRegistry || !qgcApp() || !qgcApp()->toolbox()) {
+        return;
+    }
+
+    MultiVehicleManager* manager = qgcApp()->toolbox()->multiVehicleManager();
+    if (!manager || !manager->vehicles()) {
+        return;
+    }
+
+    const QDateTime nowUtc = QDateTime::currentDateTimeUtc();
+    QSet<int> observedIds;
+    QmlObjectListModel* model = manager->vehicles();
+    const int count = model->objectList()->count();
+    for (int i = 0; i < count; ++i) {
+        Vehicle* vehicle = qobject_cast<Vehicle*>(model->get(i));
+        if (!vehicle || vehicle->id() <= 0) {
+            continue;
+        }
+
+        const bool linkAvailable = vehicle->vehicleLinkManager()
+            && !vehicle->vehicleLinkManager()->communicationLost();
+        const bool online = vehicle->isInitialConnectComplete() && linkAvailable;
+        QStringList capabilities;
+        if (vehicle->guidedModeSupported()) {
+            capabilities << QStringLiteral("guided");
+        }
+        if (vehicle->px4Firmware()) {
+            capabilities << QStringLiteral("px4");
+        }
+        if (vehicle->fixedWing()) {
+            capabilities << QStringLiteral("fixed-wing");
+        } else {
+            capabilities << QStringLiteral("multirotor");
+        }
+
+        QVariantMap descriptor;
+        descriptor.insert(QStringLiteral("systemId"), vehicle->id());
+        descriptor.insert(QStringLiteral("vehicleType"), vehicle->fixedWing()
+                              ? QStringLiteral("fixed-wing")
+                              : QStringLiteral("multirotor"));
+        descriptor.insert(QStringLiteral("autopilotType"), vehicle->px4Firmware()
+                              ? QStringLiteral("PX4")
+                              : QStringLiteral("unknown"));
+        descriptor.insert(QStringLiteral("capabilities"), capabilities);
+        descriptor.insert(QStringLiteral("online"), online);
+        // Keep the leader role name aligned with FaultToleranceManager's
+        // failover policy.  A disconnected UAV-1 must produce a reassign
+        // recommendation instead of being misclassified as an ordinary
+        // member and put on hold.
+        descriptor.insert(QStringLiteral("role"), vehicle->id() == kSwarmLeaderSystemId
+                              ? QStringLiteral("leader")
+                              : QStringLiteral("member"));
+        descriptor.insert(QStringLiteral("positionHealthy"), vehicle->coordinate().isValid());
+        if (online) {
+            descriptor.insert(QStringLiteral("lastSeenUtc"), nowUtc.toString(Qt::ISODateWithMs));
+        }
+
+        observedIds.insert(vehicle->id());
+        if (_fleetRegistry->containsVehicle(vehicle->id())) {
+            QVariantMap heartbeat;
+            heartbeat.insert(QStringLiteral("online"), online);
+            if (online) {
+                heartbeat.insert(QStringLiteral("lastSeenUtc"), nowUtc.toString(Qt::ISODateWithMs));
+                _fleetRegistry->markSeen(vehicle->id(), heartbeat);
+            } else {
+                const QVariantMap current = _fleetRegistry->vehicle(vehicle->id());
+                if (current.value(QStringLiteral("online")).toBool()) {
+                    _fleetRegistry->updateVehicle(vehicle->id(), heartbeat);
+                }
+            }
+        } else {
+            _fleetRegistry->registerVehicle(descriptor);
+        }
+    }
+
+    // Keep disconnected vehicles in the registry for diagnostics and replay,
+    // but stop treating them as eligible live members.
+    for (const QVariant& value : _fleetRegistry->vehicles()) {
+        const int systemId = value.toMap().value(QStringLiteral("systemId")).toInt();
+        if (systemId > 0 && !observedIds.contains(systemId)
+            && value.toMap().value(QStringLiteral("online")).toBool()) {
+            _fleetRegistry->updateVehicle(systemId, QVariantMap{{QStringLiteral("online"), false}});
+        }
+    }
 }
 
 QVariantMap SwarmController::executeGoto(const QVariantList& selectedVehicleIds, const QVariant& targetCoordinate)
@@ -97,8 +202,8 @@ QVariantMap SwarmController::executeTakeoff(const QVariantList& selectedVehicleI
     const QList<Vehicle*> vehicles = _selectedVehicles(selectedVehicleIds);
     QList<int> dispatchedIds;
     QList<int> skippedIds;
+    QList<Vehicle*> readyVehicles;
     QSet<int> matchedIds;
-    int delayMs = 0;
 
     // 错峰触发各机的异步预检，避免同一链路瞬时堆积命令；结果中的 dispatchedIds
     // 仅表示已进入预检/下发流程，最终 ACK 仍由各 Vehicle 独立处理。
@@ -113,9 +218,8 @@ QVariantMap SwarmController::executeTakeoff(const QVariantList& selectedVehicleI
             continue;
         }
 
-        _dispatchTakeoff(vehicle, altitudeMeters, delayMs);
         dispatchedIds << vehicle->id();
-        delayMs += 200;
+        readyVehicles << vehicle;
     }
 
     for (int id : requestedIds) {
@@ -125,11 +229,28 @@ QVariantMap SwarmController::executeTakeoff(const QVariantList& selectedVehicleI
     }
 
     const bool ok = !dispatchedIds.isEmpty();
+    if (!ok) {
+        return _result(false,
+                       tr("No selected vehicle met the takeoff requirements."),
+                       dispatchedIds,
+                       skippedIds);
+    }
+
+    // The transaction completes only on MAV_CMD_NAV_TAKEOFF ACK (or timeout),
+    // never merely because the request entered a QTimer dispatch queue.
+    CommandTransaction* transaction = _createCommandTransaction(
+        QStringLiteral("takeoff"), dispatchedIds, 45000, 0, MAV_CMD_NAV_TAKEOFF);
+    int delayMs = 0;
+    for (Vehicle* vehicle : readyVehicles) {
+        _dispatchTakeoff(vehicle, altitudeMeters, delayMs,
+                         transaction ? transaction->transactionId() : QString());
+        delayMs += 200;
+    }
     return _result(ok,
-                   ok ? tr("Batch takeoff checks scheduled for the selected vehicles.")
-                      : tr("No selected vehicle met the takeoff requirements."),
+                   tr("Batch takeoff requests dispatched; waiting for MAV_CMD_NAV_TAKEOFF ACK."),
                    dispatchedIds,
-                   skippedIds);
+                   skippedIds,
+                   transaction ? transaction->transactionId() : QString());
 }
 
 QVariantMap SwarmController::executeLand(const QVariantList& selectedVehicleIds)
@@ -150,8 +271,8 @@ QVariantMap SwarmController::executeLand(const QVariantList& selectedVehicleIds)
     const QList<Vehicle*> vehicles = _selectedVehicles(selectedVehicleIds);
     QList<int> dispatchedIds;
     QList<int> skippedIds;
+    QList<Vehicle*> readyVehicles;
     QSet<int> matchedIds;
-    int delayMs = 0;
 
     for (Vehicle* vehicle : vehicles) {
         if (!vehicle) {
@@ -164,9 +285,8 @@ QVariantMap SwarmController::executeLand(const QVariantList& selectedVehicleIds)
             continue;
         }
 
-        _dispatchLand(vehicle, delayMs);
         dispatchedIds << vehicle->id();
-        delayMs += 200;
+        readyVehicles << vehicle;
     }
 
     for (int id : requestedIds) {
@@ -176,11 +296,28 @@ QVariantMap SwarmController::executeLand(const QVariantList& selectedVehicleIds)
     }
 
     const bool ok = !dispatchedIds.isEmpty();
+    if (!ok) {
+        return _result(false,
+                       tr("No selected vehicle met the landing requirements."),
+                       dispatchedIds,
+                       skippedIds);
+    }
+
+    // PX4 may send SET_MODE without a command ACK.  The transaction therefore
+    // remains pending until landFlightMode() is observed in telemetry.
+    CommandTransaction* transaction = _createCommandTransaction(
+        QStringLiteral("land"), dispatchedIds, 30000, 0, MAV_CMD_DO_SET_MODE);
+    int delayMs = 0;
+    for (Vehicle* vehicle : readyVehicles) {
+        _dispatchLand(vehicle, delayMs,
+                      transaction ? transaction->transactionId() : QString());
+        delayMs += 200;
+    }
     return _result(ok,
-                   ok ? tr("Batch landing commands scheduled for the selected vehicles.")
-                      : tr("No selected vehicle met the landing requirements."),
+                   tr("Batch landing requests dispatched; waiting for landing-mode telemetry."),
                    dispatchedIds,
-                   skippedIds);
+                   skippedIds,
+                   transaction ? transaction->transactionId() : QString());
 }
 
 QVariantMap SwarmController::executeRTL(const QVariantList& selectedVehicleIds)
@@ -201,8 +338,8 @@ QVariantMap SwarmController::executeRTL(const QVariantList& selectedVehicleIds)
     const QList<Vehicle*> vehicles = _selectedVehicles(selectedVehicleIds);
     QList<int> dispatchedIds;
     QList<int> skippedIds;
+    QList<Vehicle*> readyVehicles;
     QSet<int> matchedIds;
-    int delayMs = 0;
 
     for (Vehicle* vehicle : vehicles) {
         if (!vehicle) {
@@ -215,9 +352,8 @@ QVariantMap SwarmController::executeRTL(const QVariantList& selectedVehicleIds)
             continue;
         }
 
-        _dispatchRTL(vehicle, delayMs);
         dispatchedIds << vehicle->id();
-        delayMs += 200;
+        readyVehicles << vehicle;
     }
 
     for (int id : requestedIds) {
@@ -227,11 +363,28 @@ QVariantMap SwarmController::executeRTL(const QVariantList& selectedVehicleIds)
     }
 
     const bool ok = !dispatchedIds.isEmpty();
+    if (!ok) {
+        return _result(false,
+                       tr("No selected vehicle met the return requirements."),
+                       dispatchedIds,
+                       skippedIds);
+    }
+
+    // As with land, completion is confirmed by the reported RTL mode.  An
+    // accepted SET_MODE command is only an acceptance of the request.
+    CommandTransaction* transaction = _createCommandTransaction(
+        QStringLiteral("rtl"), dispatchedIds, 45000, 0, MAV_CMD_DO_SET_MODE);
+    int delayMs = 0;
+    for (Vehicle* vehicle : readyVehicles) {
+        _dispatchRTL(vehicle, delayMs,
+                     transaction ? transaction->transactionId() : QString());
+        delayMs += 200;
+    }
     return _result(ok,
-                   ok ? tr("Batch return commands scheduled for the selected vehicles.")
-                      : tr("No selected vehicle met the return requirements."),
+                   tr("Batch return requests dispatched; waiting for RTL-mode telemetry."),
                    dispatchedIds,
-                   skippedIds);
+                   skippedIds,
+                   transaction ? transaction->transactionId() : QString());
 }
 
 bool SwarmController::hasActiveTemporaryMission(const QVariantList& selectedVehicleIds) const
@@ -266,10 +419,8 @@ QVariantMap SwarmController::sendStartCommand(const QVariantList& selectedVehicl
         return _result(false, tr("A formation transaction is already active. End it before starting another one."));
     }
 
-    if (selectedVehicleIds.count() != 1
-        && selectedVehicleIds.count() != 2
-        && selectedVehicleIds.count() != kSwarmVehicleCount) {
-        return _result(false, tr("Formation validation supports one, two, or six selected vehicles."));
+    if (selectedVehicleIds.isEmpty() || selectedVehicleIds.count() > kSwarmVehicleCount) {
+        return _result(false, tr("Formation validation supports one to six selected vehicles."));
     }
 
     QSet<int> requestedIds;
@@ -304,7 +455,10 @@ QVariantMap SwarmController::sendStartCommand(const QVariantList& selectedVehicl
             skippedIds << vehicle->id();
         }
     }
-    for (int id = 1; id <= 6; ++id) {
+    // Only the explicitly selected members participate in this transaction.
+    // The previous fixed 1..6 loop made valid one- and two-vehicle sessions
+    // fail because unselected vehicles were appended to skippedIds.
+    for (int id : requestedIds) {
         if (!matchedIds.contains(id)) {
             skippedIds << id;
         }
@@ -340,7 +494,7 @@ QVariantMap SwarmController::sendStartCommand(const QVariantList& selectedVehicl
     if (!_sendFormationCommand(MAV_CMD_USER_1, _formationVehicleIds, &dispatchedIds, &commandSkippedIds)) {
         _beginFormationAbort(tr("One or more PREPARE commands could not be scheduled."));
         return _result(false, tr("Formation preparation failed to schedule; rollback started."),
-                       dispatchedIds, commandSkippedIds);
+                       dispatchedIds, commandSkippedIds, _lastFormationTransactionId);
     }
 
     _reportedLostFollowerIds.clear();
@@ -348,7 +502,9 @@ QVariantMap SwarmController::sendStartCommand(const QVariantList& selectedVehicl
     _formationCommandTimer.start(10000);
 
     return _result(true, tr("Formation PREPARE started for the selected members."),
-                   dispatchedIds);
+                   dispatchedIds,
+                   QList<int>(),
+                   _lastFormationTransactionId);
 }
 
 QVariantMap SwarmController::endFormationSession()
@@ -359,7 +515,8 @@ QVariantMap SwarmController::endFormationSession()
 
     const QList<int> members = _formationVehicleIds;
     _beginFormationAbort(tr("Formation stop requested by the operator."));
-    return _result(true, tr("Formation ABORT started; members are transitioning to Hold."), members);
+    return _result(true, tr("Formation ABORT started; members are transitioning to Hold."),
+                   members, QList<int>(), _lastFormationTransactionId);
 }
 
 QVariantMap SwarmController::_executeGotoInternal(const QVariantList& selectedVehicleIds,
@@ -438,9 +595,15 @@ QVariantMap SwarmController::_executeGotoInternal(const QVariantList& selectedVe
         }
 
         _cancelTemporaryMissionForGoto(vehicle);
-        _dispatchGoto(vehicle, finalTarget, 0);
         dispatchedIds << vehicle->id();
-        return _result(true, tr("Goto command dispatched."), dispatchedIds, skippedIds);
+        CommandTransaction* transaction = _createCommandTransaction(
+            QStringLiteral("goto"), dispatchedIds, 15000, 0, MAV_CMD_DO_REPOSITION);
+        _dispatchGoto(vehicle, finalTarget, 0,
+                      transaction ? transaction->transactionId() : QString());
+        return _result(true,
+                       tr("Goto request dispatched; waiting for MAV_CMD_DO_REPOSITION ACK."),
+                       dispatchedIds, skippedIds,
+                       transaction ? transaction->transactionId() : QString());
     }
 
     // 多机目标由确认时冻结的参考坐标计算。确认后即使焦点或选择发生变化，
@@ -467,6 +630,8 @@ QVariantMap SwarmController::_executeGotoInternal(const QVariantList& selectedVe
     const QGeoCoordinate centroid(centerLat / validCount, centerLon / validCount);
 
     int delayMs = 50;
+    QList<Vehicle*> readyGotoVehicles;
+    QHash<int, QGeoCoordinate> gotoTargets;
     for (Vehicle* vehicle : vehicles) {
         if (!_vehicleReady(vehicle)) {
             if (vehicle) {
@@ -495,7 +660,8 @@ QVariantMap SwarmController::_executeGotoInternal(const QVariantList& selectedVe
             const double moveAzimuth = centroid.azimuthTo(finalTarget);
             const QGeoCoordinate vehicleTarget = vehicle->coordinate().atDistanceAndAzimuth(moveDistance, moveAzimuth);
             _cancelTemporaryMissionForGoto(vehicle);
-            _dispatchGoto(vehicle, vehicleTarget, delayMs);
+            readyGotoVehicles << vehicle;
+            gotoTargets.insert(vehicle->id(), vehicleTarget);
         }
 
         dispatchedIds << vehicle->id();
@@ -503,7 +669,27 @@ QVariantMap SwarmController::_executeGotoInternal(const QVariantList& selectedVe
     }
 
     const bool ok = !dispatchedIds.isEmpty();
-    return _result(ok, ok ? (queued ? tr("Temporary swarm mission upload started.") : tr("Swarm goto command dispatched.")) : tr("No selected vehicle met the safety requirements."), dispatchedIds, skippedIds);
+    if (!ok) {
+        return _result(false, tr("No selected vehicle met the safety requirements."), dispatchedIds, skippedIds);
+    }
+
+    CommandTransaction* transaction = nullptr;
+    if (!queued) {
+        transaction = _createCommandTransaction(
+            QStringLiteral("goto"), dispatchedIds, 15000, 0, MAV_CMD_DO_REPOSITION);
+    }
+    delayMs = 50;
+    for (Vehicle* vehicle : readyGotoVehicles) {
+        _dispatchGoto(vehicle, gotoTargets.value(vehicle->id()), delayMs,
+                      transaction ? transaction->transactionId() : QString());
+        delayMs += 200;
+    }
+
+    return _result(true,
+                   queued ? tr("Temporary swarm mission upload started.")
+                          : tr("Swarm goto requests dispatched; waiting for MAV_CMD_DO_REPOSITION ACK."),
+                   dispatchedIds, skippedIds,
+                   transaction ? transaction->transactionId() : QString());
 }
 
 QList<Vehicle*> SwarmController::_selectedVehicles(const QVariantList& selectedVehicleIds) const
@@ -542,7 +728,11 @@ QList<Vehicle*> SwarmController::_selectedVehicles(const QVariantList& selectedV
     return result;
 }
 
-QVariantMap SwarmController::_result(bool ok, const QString& message, const QList<int>& dispatchedIds, const QList<int>& skippedIds) const
+QVariantMap SwarmController::_result(bool ok,
+                                      const QString& message,
+                                      const QList<int>& dispatchedIds,
+                                      const QList<int>& skippedIds,
+                                      const QString& transactionId) const
 {
     QVariantList dispatched;
     QVariantList skipped;
@@ -558,7 +748,220 @@ QVariantMap SwarmController::_result(bool ok, const QString& message, const QLis
     map.insert(QStringLiteral("message"), message);
     map.insert(QStringLiteral("dispatchedIds"), dispatched);
     map.insert(QStringLiteral("skippedIds"), skipped);
+    if (!transactionId.isEmpty()) {
+        map.insert(QStringLiteral("transactionId"), transactionId);
+        const auto it = _transactions.constFind(transactionId);
+        if (it != _transactions.constEnd() && it.value()) {
+            map.insert(QStringLiteral("transaction"), it.value()->resultSummary());
+        }
+    }
     return map;
+}
+
+QVariantList SwarmController::transactions() const
+{
+    QVariantList result;
+    QStringList ids = _transactions.keys();
+    std::sort(ids.begin(), ids.end());
+    for (const QString& id : ids) {
+        const auto it = _transactions.constFind(id);
+        if (it != _transactions.constEnd() && it.value()) {
+            result.append(it.value()->resultSummary());
+        }
+    }
+    return result;
+}
+
+QVariantMap SwarmController::transactionSummary(const QString& transactionId) const
+{
+    const auto it = _transactions.constFind(transactionId.trimmed());
+    return it != _transactions.constEnd() && it.value()
+        ? it.value()->resultSummary()
+        : QVariantMap();
+}
+
+CommandTransaction* SwarmController::_createCommandTransaction(const QString& command,
+                                                                const QList<int>& vehicleIds,
+                                                                int timeoutMs,
+                                                                int maxRetries,
+                                                                int expectedMavCommand)
+{
+    QVariantList ids;
+    for (int vehicleId : vehicleIds) {
+        ids.append(vehicleId);
+    }
+    if (ids.isEmpty()) {
+        return nullptr;
+    }
+
+    auto* transaction = new CommandTransaction(command, ids, this);
+    transaction->setTimeoutMs(timeoutMs);
+    transaction->setMaxRetries(maxRetries);
+
+    ManagedTransaction managed;
+    managed.transaction = transaction;
+    managed.operation = command.trimmed().toLower();
+    managed.expectedMavCommand = expectedMavCommand;
+    _transactions.insert(transaction->transactionId(), transaction);
+    _managedTransactions.insert(transaction->transactionId(), managed);
+
+    connect(transaction, &CommandTransaction::statusChanged, this, [this, transaction]() {
+        emit transactionUpdated(transaction->transactionId());
+        emit transactionsChanged();
+    });
+    connect(transaction, &CommandTransaction::resultChanged, this, [this, transaction]() {
+        emit transactionUpdated(transaction->transactionId());
+        emit transactionsChanged();
+    });
+
+    MultiVehicleManager* manager = qgcApp() && qgcApp()->toolbox()
+        ? qgcApp()->toolbox()->multiVehicleManager()
+        : nullptr;
+    for (int vehicleId : vehicleIds) {
+        Vehicle* vehicle = manager ? manager->getVehicleById(vehicleId) : nullptr;
+        if (vehicle) {
+            _ensureCommandConnection(vehicle);
+        }
+    }
+
+    if (!transaction->start()) {
+        _managedTransactions.remove(transaction->transactionId());
+        _transactions.remove(transaction->transactionId());
+        transaction->deleteLater();
+        return nullptr;
+    }
+
+    emit transactionsChanged();
+    return transaction;
+}
+
+void SwarmController::_ensureCommandConnection(Vehicle* vehicle)
+{
+    if (!vehicle) {
+        return;
+    }
+
+    connect(vehicle, &Vehicle::mavCommandResult,
+            this, &SwarmController::_handleCommandResult,
+            Qt::UniqueConnection);
+    _commandConnectionIds.insert(vehicle->id());
+}
+
+void SwarmController::_markTransactionFailed(const QString& transactionId,
+                                              int vehicleId,
+                                              const QString& reason)
+{
+    if (transactionId.isEmpty()) {
+        return;
+    }
+    const auto it = _transactions.constFind(transactionId);
+    if (it == _transactions.constEnd() || !it.value()) {
+        return;
+    }
+    it.value()->markVehicleFailed(vehicleId, reason);
+}
+
+void SwarmController::_handleCommandResult(int vehicleId,
+                                            int targetComponent,
+                                            int command,
+                                            int ackResult,
+                                            int failureCode)
+{
+    Q_UNUSED(targetComponent)
+
+    const bool accepted = ackResult == MAV_RESULT_ACCEPTED;
+    const bool inProgress = ackResult == MAV_RESULT_IN_PROGRESS;
+    for (auto it = _managedTransactions.begin(); it != _managedTransactions.end(); ++it) {
+        ManagedTransaction& managed = it.value();
+        CommandTransaction* transaction = managed.transaction;
+        if (!transaction || transaction->isTerminal()
+            || managed.expectedMavCommand != command) {
+            continue;
+        }
+
+        const QVariantMap current = transaction->vehicleResult(vehicleId);
+        if (current.isEmpty()) {
+            continue;
+        }
+        const QString state = current.value(QStringLiteral("state")).toString();
+        if (state != QStringLiteral("pending") && state != QStringLiteral("running")) {
+            continue;
+        }
+        if (inProgress) {
+            continue;
+        }
+
+        QVariantMap details;
+        details.insert(QStringLiteral("ackResult"), ackResult);
+        details.insert(QStringLiteral("failureCode"), failureCode);
+        details.insert(QStringLiteral("confirmation"), accepted
+                       ? QStringLiteral("mavlink_ack")
+                       : QStringLiteral("mavlink_rejection"));
+
+        if (accepted) {
+            // For land/RTL, SET_MODE acceptance only means the autopilot
+            // accepted the request.  _checkCommandTransactions waits for the
+            // reported target mode before marking that vehicle succeeded.
+            if (managed.operation == QStringLiteral("land")
+                || managed.operation == QStringLiteral("rtl")) {
+                continue;
+            }
+            transaction->markVehicleSucceeded(vehicleId, details);
+        } else {
+            transaction->markVehicleFailed(vehicleId,
+                                           tr("Vehicle rejected command %1 (MAV_RESULT %2).")
+                                               .arg(command)
+                                               .arg(ackResult),
+                                           details);
+        }
+    }
+}
+
+void SwarmController::_checkCommandTransactions()
+{
+    MultiVehicleManager* manager = qgcApp() && qgcApp()->toolbox()
+        ? qgcApp()->toolbox()->multiVehicleManager()
+        : nullptr;
+    for (auto it = _managedTransactions.begin(); it != _managedTransactions.end(); ++it) {
+        ManagedTransaction& managed = it.value();
+        CommandTransaction* transaction = managed.transaction;
+        if (!transaction || transaction->isTerminal()) {
+            continue;
+        }
+
+        const QVariantList targetIds = transaction->targetVehicleIds();
+        for (const QVariant& target : targetIds) {
+            const int vehicleId = target.toInt();
+            const QVariantMap current = transaction->vehicleResult(vehicleId);
+            const QString state = current.value(QStringLiteral("state")).toString();
+            if (state != QStringLiteral("pending") && state != QStringLiteral("running")) {
+                continue;
+            }
+
+            Vehicle* vehicle = manager ? manager->getVehicleById(vehicleId) : nullptr;
+            if (!vehicle || !vehicle->vehicleLinkManager()
+                || vehicle->vehicleLinkManager()->communicationLost()) {
+                transaction->markVehicleFailed(vehicleId,
+                                               tr("Vehicle telemetry/link was lost while waiting for confirmation."));
+                continue;
+            }
+
+            if (managed.operation == QStringLiteral("land")
+                && vehicle->flightMode() == vehicle->landFlightMode()) {
+                transaction->markVehicleSucceeded(
+                    vehicleId,
+                    QVariantMap{{QStringLiteral("confirmation"), QStringLiteral("flight_mode_telemetry")},
+                                {QStringLiteral("flightMode"), vehicle->flightMode()}});
+            } else if (managed.operation == QStringLiteral("rtl")
+                       && vehicle->flightMode() == vehicle->rtlFlightMode()) {
+                transaction->markVehicleSucceeded(
+                    vehicleId,
+                    QVariantMap{{QStringLiteral("confirmation"), QStringLiteral("flight_mode_telemetry")},
+                                {QStringLiteral("flightMode"), vehicle->flightMode()}});
+            }
+        }
+        transaction->checkTimeout();
+    }
 }
 
 QGeoCoordinate SwarmController::_coordinateFromVariant(const QVariant& value) const
@@ -571,7 +974,14 @@ QGeoCoordinate SwarmController::_coordinateFromVariant(const QVariant& value) co
 
 bool SwarmController::_vehicleReady(Vehicle* vehicle) const
 {
-    if (!vehicle || !vehicle->armed() || !vehicle->altitudeRelative()) {
+    if (!vehicle
+        || !vehicle->isInitialConnectComplete()
+        || !vehicle->vehicleLinkManager()
+        || vehicle->vehicleLinkManager()->communicationLost()
+        || !vehicle->guidedModeSupported()
+        || !vehicle->armed()
+        || !vehicle->coordinate().isValid()
+        || !vehicle->altitudeRelative()) {
         return false;
     }
 
@@ -635,58 +1045,93 @@ bool SwarmController::_vehicleFormationReady(Vehicle* vehicle) const
         return false;
     }
 
+    // An unavailable health report is not proof that the vehicle is safe.
+    // Require a supported, positive report before entering a formation.
     HealthAndArmingCheckReport* report = vehicle->healthAndArmingCheckReport();
-    return !report || !report->supported() || report->canTakeoff();
+    return report && report->supported() && report->canTakeoff();
 }
 
-void SwarmController::_dispatchGoto(Vehicle* vehicle, const QGeoCoordinate& coordinate, int delayMs)
+void SwarmController::_dispatchGoto(Vehicle* vehicle,
+                                     const QGeoCoordinate& coordinate,
+                                     int delayMs,
+                                     const QString& transactionId)
 {
     QPointer<Vehicle> guardedVehicle(vehicle);
-    QTimer::singleShot(delayMs, this, [guardedVehicle, coordinate]() {
+    QTimer::singleShot(delayMs, this, [this, guardedVehicle, coordinate, transactionId]() {
         if (!guardedVehicle) {
             return;
         }
 
+        const auto dispatchGoto = [this, guardedVehicle, coordinate, transactionId]() {
+            if (!guardedVehicle) {
+                return;
+            }
+            if (!_vehicleReady(guardedVehicle)) {
+                _markTransactionFailed(transactionId, guardedVehicle->id(),
+                                       tr("Goto preconditions changed before dispatch."));
+                return;
+            }
+            _ensureCommandConnection(guardedVehicle);
+            guardedVehicle->guidedModeGotoLocation(coordinate);
+        };
+
         if (guardedVehicle->flightMode() != guardedVehicle->gotoFlightMode()) {
             guardedVehicle->setFlightMode(guardedVehicle->gotoFlightMode());
-            QTimer::singleShot(300, guardedVehicle, [guardedVehicle, coordinate]() {
-                if (guardedVehicle) {
-                    guardedVehicle->guidedModeGotoLocation(coordinate);
-                }
-            });
+            QTimer::singleShot(300, this, dispatchGoto);
         } else {
-            guardedVehicle->guidedModeGotoLocation(coordinate);
+            dispatchGoto();
         }
     });
 }
 
-void SwarmController::_dispatchTakeoff(Vehicle* vehicle, double altitudeMeters, int delayMs)
+void SwarmController::_dispatchTakeoff(Vehicle* vehicle, double altitudeMeters, int delayMs, const QString& transactionId)
 {
     QPointer<Vehicle> guardedVehicle(vehicle);
-    QTimer::singleShot(delayMs, this, [this, guardedVehicle, altitudeMeters]() {
-        if (guardedVehicle && _vehicleTakeoffReady(guardedVehicle, altitudeMeters)) {
-            guardedVehicle->guidedModeTakeoff(altitudeMeters);
+    QTimer::singleShot(delayMs, this, [this, guardedVehicle, altitudeMeters, transactionId]() {
+        if (!guardedVehicle) {
+            return;
         }
+        if (!_vehicleTakeoffReady(guardedVehicle, altitudeMeters)) {
+            _markTransactionFailed(transactionId, guardedVehicle->id(),
+                                   tr("Takeoff preconditions changed before dispatch."));
+            return;
+        }
+        _ensureCommandConnection(guardedVehicle);
+        guardedVehicle->guidedModeTakeoff(altitudeMeters);
     });
 }
 
-void SwarmController::_dispatchLand(Vehicle* vehicle, int delayMs)
+void SwarmController::_dispatchLand(Vehicle* vehicle, int delayMs, const QString& transactionId)
 {
     QPointer<Vehicle> guardedVehicle(vehicle);
-    QTimer::singleShot(delayMs, this, [this, guardedVehicle]() {
-        if (guardedVehicle && _vehicleLandReady(guardedVehicle)) {
-            guardedVehicle->guidedModeLand();
+    QTimer::singleShot(delayMs, this, [this, guardedVehicle, transactionId]() {
+        if (!guardedVehicle) {
+            return;
         }
+        if (!_vehicleLandReady(guardedVehicle)) {
+            _markTransactionFailed(transactionId, guardedVehicle->id(),
+                                   tr("Landing preconditions changed before dispatch."));
+            return;
+        }
+        _ensureCommandConnection(guardedVehicle);
+        guardedVehicle->guidedModeLand();
     });
 }
 
-void SwarmController::_dispatchRTL(Vehicle* vehicle, int delayMs)
+void SwarmController::_dispatchRTL(Vehicle* vehicle, int delayMs, const QString& transactionId)
 {
     QPointer<Vehicle> guardedVehicle(vehicle);
-    QTimer::singleShot(delayMs, this, [this, guardedVehicle]() {
-        if (guardedVehicle && _vehicleRTLReady(guardedVehicle)) {
-            guardedVehicle->guidedModeRTL(false);
+    QTimer::singleShot(delayMs, this, [this, guardedVehicle, transactionId]() {
+        if (!guardedVehicle) {
+            return;
         }
+        if (!_vehicleRTLReady(guardedVehicle)) {
+            _markTransactionFailed(transactionId, guardedVehicle->id(),
+                                   tr("RTL preconditions changed before dispatch."));
+            return;
+        }
+        _ensureCommandConnection(guardedVehicle);
+        guardedVehicle->guidedModeRTL(false);
     });
 }
 
@@ -969,6 +1414,11 @@ void SwarmController::_ensureFormationCommandConnection(Vehicle* vehicle)
         return;
     }
 
+    // Formation phases have their own state machine, but their MAVLink ACKs
+    // must also update the shared CommandTransaction.  Without this second
+    // connection the phase watchdog could advance while the transaction stayed
+    // pending until timeout.
+    _ensureCommandConnection(vehicle);
     connect(vehicle, &Vehicle::mavCommandResult,
             this, &SwarmController::_handleFormationCommandResult,
             Qt::UniqueConnection);
@@ -985,6 +1435,31 @@ bool SwarmController::_sendFormationCommand(MAV_CMD command,
         return false;
     }
 
+    QString phaseName;
+    int timeoutMs = 10000;
+    switch (command) {
+    case MAV_CMD_USER_1:
+        phaseName = QStringLiteral("formation.prepare");
+        break;
+    case MAV_CMD_USER_2:
+        phaseName = QStringLiteral("formation.commit");
+        timeoutMs = 70000;
+        break;
+    case MAV_CMD_USER_3:
+        phaseName = QStringLiteral("formation.release");
+        break;
+    case MAV_CMD_USER_4:
+        phaseName = QStringLiteral("formation.abort");
+        timeoutMs = 30000;
+        break;
+    default:
+        phaseName = QStringLiteral("formation.command");
+        break;
+    }
+    CommandTransaction* transaction = _createCommandTransaction(
+        phaseName, vehicleIds, timeoutMs, 0, command);
+    _lastFormationTransactionId = transaction ? transaction->transactionId() : QString();
+
     bool allScheduled = true;
     for (int vehicleId : vehicleIds) {
         Vehicle* vehicle = manager->getVehicleById(vehicleId);
@@ -1000,6 +1475,10 @@ bool SwarmController::_sendFormationCommand(MAV_CMD command,
             allScheduled = false;
             if (skippedIds) {
                 skippedIds->append(vehicleId);
+            }
+            if (transaction) {
+                transaction->markVehicleFailed(vehicleId,
+                                               tr("Vehicle link unavailable while scheduling formation phase."));
             }
             continue;
         }
@@ -1161,7 +1640,8 @@ void SwarmController::_pauseFormationFollowers()
     const int count = model->objectList()->count();
     for (int i = 0; i < count; ++i) {
         Vehicle* vehicle = qobject_cast<Vehicle*>(model->get(i));
-        if (!vehicle || !_formationVehicleIds.contains(vehicle->id())
+        if (!vehicle || vehicle->id() == kSwarmLeaderSystemId
+            || !_formationVehicleIds.contains(vehicle->id())
             || !vehicle->vehicleLinkManager() || vehicle->vehicleLinkManager()->communicationLost()) {
             continue;
         }
@@ -1290,7 +1770,8 @@ void SwarmController::_checkFormationHealth()
 
 void SwarmController::_receiveMessage(LinkInterface* link, mavlink_message_t message)
 {
-    if (!_formationForwardingEnabled || message.msgid != MAVLINK_MSG_ID_GPS_RAW_INT || message.sysid != 1) {
+    if (!_formationForwardingEnabled || message.msgid != MAVLINK_MSG_ID_GPS_RAW_INT
+        || message.sysid != kSwarmLeaderSystemId) {
         return;
     }
 
@@ -1326,7 +1807,8 @@ void SwarmController::_receiveMessage(LinkInterface* link, mavlink_message_t mes
     const int count = model->objectList()->count();
     for (int i = 0; i < count; ++i) {
         Vehicle* vehicle = qobject_cast<Vehicle*>(model->get(i));
-        if (!vehicle || !_formationVehicleIds.contains(vehicle->id())
+        if (!vehicle || vehicle->id() == kSwarmLeaderSystemId
+            || !_formationVehicleIds.contains(vehicle->id())
             || !vehicle->vehicleLinkManager()
             || vehicle->vehicleLinkManager()->communicationLost()) {
             continue;
