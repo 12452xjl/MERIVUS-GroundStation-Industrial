@@ -21,6 +21,7 @@
 #include "QGCToolbox.h"
 #include "QmlObjectListModel.h"
 #include "Vehicle.h"
+#include "VehicleBatteryFactGroup.h"
 #include "VehicleLinkManager.h"
 
 const double SwarmController::kMinimumGuidedAltitudeMeters = 5.0;
@@ -109,13 +110,79 @@ void SwarmController::_refreshFleetRegistry()
                               ? QStringLiteral("leader")
                               : QStringLiteral("member"));
         descriptor.insert(QStringLiteral("positionHealthy"), vehicle->coordinate().isValid());
+
+        // Populate the fleet health layer from signals that QGC already
+        // exposes.  Values remain absent when the vehicle has not reported
+        // them; the registry deliberately treats absent telemetry as
+        // unknown, not healthy.
+        QVariantMap healthMetadata;
+        QmlObjectListModel* batteries = vehicle->batteries();
+        double batterySum = 0.0;
+        int batterySamples = 0;
+        if (batteries) {
+            for (int batteryIndex = 0; batteryIndex < batteries->count(); ++batteryIndex) {
+                VehicleBatteryFactGroup* battery = batteries->value<VehicleBatteryFactGroup*>(batteryIndex);
+                if (!battery || !battery->percentRemaining()) {
+                    continue;
+                }
+                bool batteryValid = false;
+                const double batteryPercent = battery->percentRemaining()->rawValue().toDouble(&batteryValid);
+                if (batteryValid && batteryPercent >= 0.0 && batteryPercent <= 100.0) {
+                    batterySum += batteryPercent;
+                    ++batterySamples;
+                }
+            }
+        }
+        if (batterySamples > 0) {
+            descriptor.insert(QStringLiteral("batteryPercent"), batterySum / batterySamples);
+            healthMetadata.insert(QStringLiteral("batteryCount"), batterySamples);
+        }
+
+        // RADIO_STATUS exposes RSSI as dBm.  Convert only for the existing
+        // percentage-based health consumers and preserve the raw value and
+        // the fact that this is an estimate for diagnostics.
+        const int localRssi = vehicle->telemetryLRSSI();
+        const int remoteRssi = vehicle->telemetryRRSSI();
+        int rssiDbm = 0;
+        if (localRssi < 0) {
+            rssiDbm = localRssi;
+        }
+        if (remoteRssi < 0 && (rssiDbm == 0 || remoteRssi > rssiDbm)) {
+            rssiDbm = remoteRssi;
+        }
+        if (rssiDbm < 0) {
+            descriptor.insert(QStringLiteral("linkQualityPercent"),
+                              qBound(0, qRound((rssiDbm + 120.0) * 100.0 / 120.0), 100));
+            healthMetadata.insert(QStringLiteral("linkQualityEstimated"), true);
+            healthMetadata.insert(QStringLiteral("telemetryRssiDbm"), rssiDbm);
+        }
+
+        HealthAndArmingCheckReport* healthReport = vehicle->healthAndArmingCheckReport();
+        if (healthReport && healthReport->supported() && healthReport->updateSequence() > 0) {
+            healthMetadata.insert(QStringLiteral("healthCheckSupported"), true);
+            healthMetadata.insert(QStringLiteral("healthCheckCanTakeoff"), healthReport->canTakeoff());
+            healthMetadata.insert(QStringLiteral("healthCheckCanArm"), healthReport->canArm());
+            healthMetadata.insert(QStringLiteral("healthCheckWarnings"), healthReport->hasWarningsOrErrors());
+            healthMetadata.insert(QStringLiteral("healthCheckGpsState"), healthReport->gpsState());
+            // This is a conservative health gate, not a replacement for
+            // PX4's estimator or arming logic.  Keep the source explanation
+            // in metadata so an operator can distinguish it from EKF data.
+            descriptor.insert(QStringLiteral("estimatorHealthy"),
+                              healthReport->canTakeoff() && !healthReport->hasWarningsOrErrors());
+        }
+        if (!healthMetadata.isEmpty()) {
+            descriptor.insert(QStringLiteral("metadata"), healthMetadata);
+        }
         if (online) {
             descriptor.insert(QStringLiteral("lastSeenUtc"), nowUtc.toString(Qt::ISODateWithMs));
         }
 
         observedIds.insert(vehicle->id());
         if (_fleetRegistry->containsVehicle(vehicle->id())) {
-            QVariantMap heartbeat;
+            // Feed the live health fields on every refresh, not only when a
+            // vehicle first appears.  This keeps the command-center summary
+            // and capability matcher aligned with current battery/link data.
+            QVariantMap heartbeat = descriptor;
             heartbeat.insert(QStringLiteral("online"), online);
             if (online) {
                 heartbeat.insert(QStringLiteral("lastSeenUtc"), nowUtc.toString(Qt::ISODateWithMs));

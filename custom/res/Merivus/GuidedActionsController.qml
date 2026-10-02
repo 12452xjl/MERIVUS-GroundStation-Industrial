@@ -40,6 +40,36 @@ Item {
     FaultToleranceManager {
        id: _faultToleranceManager
     }
+    FleetIntentTask {
+       id: _fleetIntentTask
+    }
+    FleetRiskRadar {
+       id: _fleetRiskRadar
+    }
+    FleetCapabilityMatcher {
+       id: _fleetCapabilityMatcher
+    }
+    FleetEventBlackBox {
+       id: _fleetEventBlackBox
+    }
+    FleetTimelineReplay {
+       id: _fleetTimelineReplay
+    }
+    FleetMissionSimulator {
+       id: _fleetMissionSimulator
+    }
+    FleetRolePolicy {
+       id: _fleetRolePolicy
+    }
+    MissionHandoffManager {
+       id: _missionHandoffManager
+    }
+    FleetTaskTemplateRegistry {
+       id: _fleetTaskTemplates
+    }
+    FleetExtensionRegistry {
+       id: _fleetExtensions
+    }
     Timer {
        id: _fleetPolicyTimer
        interval: 1000
@@ -75,9 +105,72 @@ Item {
     readonly property var missionOrchestrator: _missionOrchestrator
     readonly property var formationPlanner: _formationPlanner
     readonly property var faultToleranceManager: _faultToleranceManager
+    readonly property var intentTask: _fleetIntentTask
+    readonly property var riskRadar: _fleetRiskRadar
+    readonly property var capabilityMatcher: _fleetCapabilityMatcher
+    readonly property var eventBlackBox: _fleetEventBlackBox
+    readonly property var timelineReplay: _fleetTimelineReplay
+    readonly property var missionSimulator: _fleetMissionSimulator
+    readonly property var rolePolicy: _fleetRolePolicy
+    readonly property var missionHandoffManager: _missionHandoffManager
+    readonly property var taskTemplateRegistry: _fleetTaskTemplates
+    readonly property var extensionRegistry: _fleetExtensions
     readonly property bool formationActive: _swarm.formationActive
     readonly property bool formationBusy: _swarm.formationBusy
     readonly property string formationStatus: _swarm.formationStatus
+
+    // Product-level intent flow.  These helpers only create and review a
+    // proposal; the existing manual action handlers remain the sole path that
+    // can call SwarmController and they still perform their own safety checks.
+    function prepareFleetIntent(intent, parameters) {
+        var proposalParameters = parameters ? parameters : {}
+        if (!proposalParameters.fleet && _swarm.fleetRegistry) {
+            proposalParameters.fleet = _swarm.fleetRegistry.vehicles
+        }
+        _fleetIntentTask.intent = intent ? intent : ""
+        _fleetIntentTask.parameters = proposalParameters
+        _fleetIntentTask.preparePreview()
+        var riskTask = { intent: _fleetIntentTask.intent,
+                         parameters: proposalParameters }
+        var risk = _fleetRiskRadar.assess(riskTask,
+                                          _fleetIntentTask.preview.riskSignals || [])
+        _fleetEventBlackBox.record("intent.preview",
+                                   { preview: _fleetIntentTask.preview, risk: risk },
+                                   "GuidedActionsController")
+        return { preview: _fleetIntentTask.preview, risk: risk,
+                 manualApprovalRequired: true, flightCommandReleased: false }
+    }
+
+    function requestFleetIntentApproval() {
+        var requested = _fleetIntentTask.requestApproval()
+        if (requested) {
+            _fleetEventBlackBox.record("intent.approval_requested",
+                                       { taskId: _fleetIntentTask.taskId },
+                                       "GuidedActionsController")
+        }
+        return requested
+    }
+
+    function approveFleetIntent() {
+        var approved = _fleetIntentTask.approve()
+        if (approved) {
+            _fleetEventBlackBox.record("intent.approved",
+                                       { taskId: _fleetIntentTask.taskId,
+                                         flightCommandReleased: false },
+                                       "GuidedActionsController")
+        }
+        return approved
+    }
+
+    function rejectFleetIntent(reason) {
+        var rejected = _fleetIntentTask.reject(reason ? reason : "operator_rejected")
+        if (rejected) {
+            _fleetEventBlackBox.record("intent.rejected",
+                                       { taskId: _fleetIntentTask.taskId, reason: reason },
+                                       "GuidedActionsController")
+        }
+        return rejected
+    }
 
     Connections {
         target: _swarm
@@ -123,6 +216,61 @@ Item {
             _missionOrchestrator.pauseTask(activeSwarmTaskId,
                                            "vehicle_%1_low_battery_%2".arg(systemId).arg(Math.round(batteryPercent)))
         }
+    }
+
+    // Keep a local, append-only operational journal.  It records state and
+    // operator workflow events only; it never becomes a second command path.
+    Connections {
+        target: _swarm
+        function onTransactionUpdated(transactionId) {
+            _fleetEventBlackBox.record("transaction.updated",
+                                       { transactionId: transactionId,
+                                         summary: _swarm.transactionSummary(transactionId) },
+                                       "SwarmController")
+        }
+        function onFormationFault(message) {
+            _fleetEventBlackBox.record("formation.fault", { message: message }, "SwarmController")
+        }
+    }
+    Connections {
+        target: _missionOrchestrator
+        function onTaskUpdated(taskId, summary) {
+            _fleetEventBlackBox.record("task.updated",
+                                       { taskId: taskId, summary: summary },
+                                       "SwarmMissionOrchestrator")
+        }
+    }
+    Connections {
+        target: _faultToleranceManager
+        function onDegradationRecommended(action, vehicleIds, reason) {
+            _fleetEventBlackBox.record("fleet.degradation",
+                                       { action: action, vehicleIds: vehicleIds, reason: reason },
+                                       "FaultToleranceManager")
+        }
+    }
+
+    function _initializeFleetOs() {
+        // Safe, descriptive defaults for the product layer.  Templates and
+        // extensions remain metadata until an operator approves a task.
+        _fleetTaskTemplates.registerTemplate("urban_patrol", qsTr("城市巡逻"),
+                                             "patrol", "patrol", ["gnss"], 2, 900,
+                                             { speedLimitMps: 8, requiresReturnPlan: true },
+                                             qsTr("按区域巡逻并回传事件位置"))
+        _fleetTaskTemplates.registerTemplate("industrial_inspection", qsTr("工业巡检"),
+                                             "inspection", "inspection", ["vision"], 1, 1200,
+                                             { compareHistory: true },
+                                             qsTr("按设备或线路执行可追溯巡检"))
+        _fleetTaskTemplates.registerTemplate("emergency_search", qsTr("应急搜索"),
+                                             "emergency", "search", [], 3, 600,
+                                             { requiresReserve: true },
+                                             qsTr("允许任务中途重分配和分组"))
+        _fleetExtensions.registerExtension("fleet.audit", qsTr("任务审计"), "1.0",
+                                           "audit", ["event-log", "replay"],
+                                           "builtin://fleet-audit")
+        _fleetExtensions.registerExtension("fleet.scenario", qsTr("任务预演"), "1.0",
+                                           "simulation", ["fault-injection", "preview"],
+                                           "builtin://fleet-scenario")
+        _fleetEventBlackBox.startRecording()
     }
 
     readonly property string emergencyStopTitle:            qsTr("EMERGENCY STOP")
@@ -362,7 +510,10 @@ Item {
 
     on_ActiveVehicleChanged: _outputState()
 
-    Component.onCompleted:              _outputState()
+    Component.onCompleted: {
+        _initializeFleetOs()
+        _outputState()
+    }
     on_VehicleArmedChanged:             _outputState()
     on_VehicleInRTLModeChanged:         _outputState()
     on_VehiclePausedChanged:            _outputState()

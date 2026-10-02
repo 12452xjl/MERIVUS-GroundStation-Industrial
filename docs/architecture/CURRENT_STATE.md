@@ -22,6 +22,10 @@ MERIVUS 已从早期界面原型进入“可构建、可本地联调、具备明
 - 飞行视图与设置页面共享的全局 AI 悬浮入口。
 - MERIVUS 集群控制第一阶段模块：`FleetRegistry`、`CommandTransaction`、
   `SwarmMissionOrchestrator`、`FormationPlanner` 和 `FaultToleranceManager`。
+- Fleet OS 产品层基础模块：`FleetIntentTask`、`FleetCapabilityMatcher`、`FleetRiskRadar`、
+  `FleetEventBlackBox`、`FleetTimelineReplay`、`FleetMissionSimulator`、`MissionHandoffManager`、
+  `FleetRolePolicy`、`FleetTaskTemplateRegistry` 和 `FleetExtensionRegistry`。这些模块只生成
+  方案、风险、审计和权限结果，不绕过人工确认或直接释放飞行命令。
 - 人工批量起飞/降落/返航/直接指点与编队阶段使用事务 ID；完成状态分别由 MAVLink ACK
   或飞行模式遥测确认，不能把“已发送”当作“已完成”。
 - 地图、指挥中心和 Guided Actions 共享同一个 `SwarmController` 实例；多机列表保持可见。

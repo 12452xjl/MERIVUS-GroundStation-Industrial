@@ -29,6 +29,9 @@ MERIVUS 是基于 QGroundControl Custom Build 的多无人机调度地面站。�
 - 集群地面站第一阶段工程师交接：[`MERIVUS_SWARM_ENGINEER_HANDOFF.md`](MERIVUS_SWARM_ENGINEER_HANDOFF.md)
 - 本批次源码文件与静态检查清单：[`MERIVUS_SWARM_PATCH_MANIFEST.md`](MERIVUS_SWARM_PATCH_MANIFEST.md)
 - 集群目标与当前缺口：[`MERIVUS_SWARM_TARGET_MATRIX.md`](../MERIVUS_SWARM_TARGET_MATRIX.md)
+- Fleet OS 协同、交接、行业模板和插件注册：[`MERIVUS_FLEET_OS_COLLABORATION.md`](../MERIVUS_FLEET_OS_COLLABORATION.md)
+- Fleet OS 意图与风险方案：[`FleetIntentRisk.md`](../../custom/src/Swarm/FleetIntentRisk.md)
+- Fleet OS 黑匣子、回放与预演：[`fleet-event-replay.md`](../fleet-event-replay.md)
 
 交接文档只说明源码接手、编译、SITL/故障注入和放行边界，不替代工程师的真实硬件测试报告。
 

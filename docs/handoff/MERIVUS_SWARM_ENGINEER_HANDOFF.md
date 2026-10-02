@@ -111,7 +111,7 @@ powershell -ExecutionPolicy Bypass -File tools/dev/build-merivus.ps1 -Configurat
 
 ## 4. 进入硬件测试前必须补齐的内容
 
-- 用当前 QGC 基线的 `Vehicle` 信号补齐电池、链路质量、估计器健康、任务进度字段；未知值必须继续保持未知。
+- 验证 `SwarmController::_refreshFleetRegistry()` 对电池平均值、健康检查摘要和 RSSI 估算链路质量的读取；如需原始 EKF/更精确链路质量，再按目标 PX4 版本接入对应 `Vehicle` Fact 信号，未知值必须继续保持未知。
 - 确认实际 PX4/MAVLink 版本对 `MAV_CMD_NAV_TAKEOFF`、`MAV_CMD_DO_REPOSITION`、模式切换以及编队自定义命令的 ACK 语义。
 - 确认真实机的 system ID、组件 ID、遥测链路和多机带宽；不能把 UAV-1/1–6 的临时限制当作通用协议。
 - 明确 `FormationPlanner` 的 ENU 偏移如何转换到机体/全球坐标，以及偏移由地面站发送还是由机载编队控制器消费。
@@ -121,7 +121,7 @@ powershell -ExecutionPolicy Bypass -File tools/dev/build-merivus.ps1 -Configurat
 
 ## 5. 已知限制和不可误读项
 
-- 当前 FleetRegistry 的健康摘要是第一阶段基础字段，不是完整飞控健康判定。
+- 当前 FleetRegistry 的健康摘要是地面站侧聚合，不是完整飞控健康判定；RSSI 百分比明确标记为估算，PX4 的 EKF/解锁安全逻辑仍是最终依据。
 - `CommandTransaction` 提供重试模型，但当前 `SwarmController` 没有把所有命令都自动重试；是否重试必须按命令和安全策略显式设计。
 - 编队协议当前固定 UAV-1 为 Leader、最大 6 机；动态 Leader、超过 6 机和复杂网络拓扑需要单独做协议/带宽设计。
 - `FaultToleranceManager` 的建议不会自动替飞机执行 RTL、降落或改航；最终故障保护仍由 PX4 机载逻辑承担。

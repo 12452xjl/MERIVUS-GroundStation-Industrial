@@ -29,9 +29,19 @@
 #include "CommandTransaction.h"
 #include "FaultToleranceManager.h"
 #include "FormationPlanner.h"
+#include "FleetExtensionRegistry.h"
+#include "FleetCapabilityMatcher.h"
 #include "FleetRegistry.h"
+#include "FleetRolePolicy.h"
+#include "FleetTaskTemplateRegistry.h"
+#include "MissionHandoffManager.h"
 #include "SwarmMissionOrchestrator.h"
 #include "SwarmController.h"
+#include "FleetEventBlackBox.h"
+#include "FleetTimelineReplay.h"
+#include "FleetMissionSimulator.h"
+#include "FleetIntentTask.h"
+#include "FleetRiskRadar.h"
 
 QGC_LOGGING_CATEGORY(CustomLog, "CustomLog")
 
@@ -91,9 +101,19 @@ CustomPlugin::CustomPlugin(QGCApplication *app, QGCToolbox* toolbox)
     qmlRegisterType<CommandTransaction>("Merivus", 1, 0, "CommandTransaction");
     qmlRegisterType<FaultToleranceManager>("Merivus", 1, 0, "FaultToleranceManager");
     qmlRegisterType<FormationPlanner>("Merivus", 1, 0, "FormationPlanner");
+    qmlRegisterType<FleetExtensionRegistry>("Merivus", 1, 0, "FleetExtensionRegistry");
+    qmlRegisterType<FleetCapabilityMatcher>("Merivus", 1, 0, "FleetCapabilityMatcher");
     qmlRegisterType<FleetRegistry>("Merivus", 1, 0, "FleetRegistry");
+    qmlRegisterType<FleetRolePolicy>("Merivus", 1, 0, "FleetRolePolicy");
+    qmlRegisterType<FleetTaskTemplateRegistry>("Merivus", 1, 0, "FleetTaskTemplateRegistry");
+    qmlRegisterType<MissionHandoffManager>("Merivus", 1, 0, "MissionHandoffManager");
     qmlRegisterType<SwarmMissionOrchestrator>("Merivus", 1, 0, "SwarmMissionOrchestrator");
     qmlRegisterType<SwarmController>("Merivus", 1, 0, "SwarmController");
+    qmlRegisterType<FleetEventBlackBox>("Merivus", 1, 0, "FleetEventBlackBox");
+    qmlRegisterType<FleetTimelineReplay>("Merivus", 1, 0, "FleetTimelineReplay");
+    qmlRegisterType<FleetMissionSimulator>("Merivus", 1, 0, "FleetMissionSimulator");
+    qmlRegisterType<FleetIntentTask>("Merivus", 1, 0, "FleetIntentTask");
+    qmlRegisterType<FleetRiskRadar>("Merivus", 1, 0, "FleetRiskRadar");
     _options = new CustomOptions(this, this);
     _showAdvancedUI = false;
 }

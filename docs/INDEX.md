@@ -36,6 +36,9 @@
 - [AI 问答与指令分离](architecture/AI_QA_INTENT_SEPARATION.md)
 - [AI 模型稳定性](architecture/AI_MODEL_STABILITY.md)
 - [MERIVUS 集群目标落地矩阵](MERIVUS_SWARM_TARGET_MATRIX.md)
+- [Fleet OS 协同、交接与扩展基础层](MERIVUS_FLEET_OS_COLLABORATION.md)
+- [Fleet OS 意图、风险、事件与预演基础层](../custom/src/Swarm/FleetIntentRisk.md)
+- [Fleet OS 事件回放与任务预演](fleet-event-replay.md)
 
 ## 设计决策
 

@@ -55,6 +55,14 @@ Item {
     readonly property var faultRecommendations: guidedController && guidedController.faultToleranceManager
                                                 ? guidedController.faultToleranceManager.recommendations
                                                 : []
+    readonly property var fleetIntentTask: guidedController && guidedController.intentTask
+                                           ? guidedController.intentTask : null
+    readonly property var fleetRiskRadar: guidedController && guidedController.riskRadar
+                                          ? guidedController.riskRadar : null
+    readonly property var fleetEventBlackBox: guidedController && guidedController.eventBlackBox
+                                              ? guidedController.eventBlackBox : null
+    readonly property var fleetHandoffManager: guidedController && guidedController.missionHandoffManager
+                                               ? guidedController.missionHandoffManager : null
 
     property real leftPanelTopExtra: 3
     property real rightPanelTopExtra: 3
@@ -630,6 +638,22 @@ function escFact(vehicle, prefix, motorIndex) {
                         elide: Text.ElideRight
                     }
                 }
+            }
+
+            QGCLabel {
+                Layout.fillWidth: true
+                text: root.fleetIntentTask
+                      ? tr("Fleet OS：意图 %1 · 风险 %2 · 事件 %3 · 待交接 %4")
+                          .arg(root.fleetIntentTask.state || tr("未创建"))
+                          .arg(root.fleetRiskRadar ? (root.fleetRiskRadar.level || tr("未知")) : tr("未知"))
+                          .arg(root.fleetEventBlackBox && root.fleetEventBlackBox.events
+                               ? root.fleetEventBlackBox.events.length : 0)
+                          .arg(root.fleetHandoffManager ? root.fleetHandoffManager.pendingCount : 0)
+                      : tr("Fleet OS：等待意图任务")
+                color: root.fleetRiskRadar && root.fleetRiskRadar.level === "critical"
+                       ? qgcPal.colorRed : qgcPal.colorGrey
+                font.pointSize: root.fontPointSize(10)
+                elide: Text.ElideRight
             }
 
             GridLayout {
