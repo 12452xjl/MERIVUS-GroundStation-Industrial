@@ -39,6 +39,7 @@
 - [Fleet OS 协同、交接与扩展基础层](MERIVUS_FLEET_OS_COLLABORATION.md)
 - [Fleet OS 意图、风险、事件与预演基础层](../custom/src/Swarm/FleetIntentRisk.md)
 - [Fleet OS 事件回放与任务预演](fleet-event-replay.md)
+- [Fleet OS 后期开发目标路线图](MERIVUS_FLEET_OS_ROADMAP.md)
 
 ## 设计决策
 
