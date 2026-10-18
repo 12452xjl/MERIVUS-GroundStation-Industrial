@@ -25,6 +25,10 @@ target_link_libraries(FirmwarePlugin
 		qgc
 )
 
+# This target unconditionally includes APM. Export the same capability gate
+# as qmake's APM block so all consumers (including header users) agree.
+target_compile_definitions(FirmwarePlugin PUBLIC MERIVUS_HAS_APM_CONFIGURATION_OBSERVATION)
+
 target_include_directories(FirmwarePlugin
 	INTERFACE
 		${CMAKE_CURRENT_SOURCE_DIR}

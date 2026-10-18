@@ -58,6 +58,8 @@ void RallyPointController::_managerVehicleChanged(Vehicle* managerVehicle)
         _managerVehicle->disconnect(this);
         _managerVehicle = nullptr;
         _rallyPointManager = nullptr;
+        _operationId = 0;
+        _operationPending = false;
     }
 
     _managerVehicle = managerVehicle;
@@ -67,10 +69,14 @@ void RallyPointController::_managerVehicleChanged(Vehicle* managerVehicle)
     }
 
     _rallyPointManager = _managerVehicle->rallyPointManager();
-    connect(_rallyPointManager, &RallyPointManager::loadComplete,       this, &RallyPointController::_managerLoadComplete);
-    connect(_rallyPointManager, &RallyPointManager::sendComplete,       this, &RallyPointController::_managerSendComplete);
-    connect(_rallyPointManager, &RallyPointManager::removeAllComplete,  this, &RallyPointController::_managerRemoveAllComplete);
+    connect(_rallyPointManager, &PlanManager::operationStarted,            this, &RallyPointController::_managerOperationStarted);
+    connect(_rallyPointManager, &PlanManager::newMissionItemsAvailableWithOperationId, this, &RallyPointController::_managerLoadCompleteWithOperationId);
+    connect(_rallyPointManager, &PlanManager::sendCompleteWithOperationId, this, &RallyPointController::_managerSendCompleteWithOperationId);
+    connect(_rallyPointManager, &PlanManager::removeAllCompleteWithOperationId, this, &RallyPointController::_managerRemoveAllCompleteWithOperationId);
     connect(_rallyPointManager, &RallyPointManager::inProgressChanged,  this, &RallyPointController::syncInProgressChanged);
+
+    _operationId = _rallyPointManager->activeOperationId();
+    _operationPending = _operationId != 0;
 
     //-- RallyPointController::supported() tests both the capability bit AND the protocol version.
     connect(_managerVehicle,    &Vehicle::capabilityBitsChanged,        this, &RallyPointController::supportedChanged);
@@ -222,6 +228,24 @@ void RallyPointController::_managerLoadComplete(void)
     _itemsRequested = false;
 }
 
+void RallyPointController::_managerOperationStarted(quint64 operationId, int transactionType)
+{
+    Q_UNUSED(transactionType)
+    _operationId = operationId;
+    _operationPending = operationId != 0;
+}
+
+void RallyPointController::_managerLoadCompleteWithOperationId(quint64 operationId, bool removeAllRequested)
+{
+    Q_UNUSED(removeAllRequested)
+    if (!_operationPending || operationId == 0 || operationId != _operationId) {
+        qCDebug(RallyPointControllerLog) << "RallyPointController ignored stale load completion" << operationId << _operationId;
+        return;
+    }
+    _operationPending = false;
+    _managerLoadComplete();
+}
+
 void RallyPointController::_managerSendComplete(bool error)
 {
     // Fly view always reloads after send
@@ -230,12 +254,32 @@ void RallyPointController::_managerSendComplete(bool error)
     }
 }
 
+void RallyPointController::_managerSendCompleteWithOperationId(quint64 operationId, bool error)
+{
+    if (!_operationPending || operationId == 0 || operationId != _operationId) {
+        qCDebug(RallyPointControllerLog) << "RallyPointController ignored stale send completion" << operationId << _operationId;
+        return;
+    }
+    _operationPending = false;
+    _managerSendComplete(error);
+}
+
 void RallyPointController::_managerRemoveAllComplete(bool error)
 {
     if (!error) {
         // Remove all from vehicle so we always update
         showPlanFromManagerVehicle();
     }
+}
+
+void RallyPointController::_managerRemoveAllCompleteWithOperationId(quint64 operationId, bool error)
+{
+    if (!_operationPending || operationId == 0 || operationId != _operationId) {
+        qCDebug(RallyPointControllerLog) << "RallyPointController ignored stale remove-all completion" << operationId << _operationId;
+        return;
+    }
+    _operationPending = false;
+    _managerRemoveAllComplete(error);
 }
 
 void RallyPointController::addPoint(QGeoCoordinate point)

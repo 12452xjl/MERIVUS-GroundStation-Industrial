@@ -31,7 +31,15 @@ QGCLabel {
 
         MenuItem {
             enabled: true
-            onTriggered: currentVehicle.flightMode = text
+            onTriggered: {
+                var controller = typeof globals !== "undefined"
+                        ? globals.guidedControllerFlyView : null
+                if (controller && typeof controller.requestFlightModeChange === "function") {
+                    controller.requestFlightModeChange(text, currentVehicle ? currentVehicle.id : 0)
+                } else {
+                    currentVehicle.flightMode = text
+                }
+            }
         }
     }
 

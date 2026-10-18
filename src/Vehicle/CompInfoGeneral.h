@@ -34,11 +34,17 @@ public:
 
     void setUris(CompInfo& compInfo) const;
 
+    // Start a genuinely new GENERAL request with no inherited catalogue or
+    // declaration. Native only; an empty/failed response cannot revive it.
+    void resetMetadata();
+
     // Overrides from CompInfo
     void setJson(const QString& metadataJsonFileName) override;
 
 private:
-    QMap<COMP_METADATA_TYPE, Uris>   _supportedTypes;
+    // Preserve unknown nonnegative JSON type identifiers as integers without
+    // converting them into potentially out-of-range C++ enum values.
+    QMap<int, Uris>   _supportedTypes;
 
     static const char*          _jsonMetadataTypesKey;
 };

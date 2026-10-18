@@ -95,6 +95,10 @@ private slots:
     void _setDirty                  (void);
     void _setFenceFromManager       (const QList<QGCFencePolygon>& polygons, const QList<QGCFenceCircle>&  circles);
     void _setReturnPointFromManager (QGeoCoordinate breachReturnPoint);
+    void _managerOperationStarted   (quint64 operationId, int transactionType);
+    void _managerLoadCompleteWithOperationId  (quint64 operationId, bool removeAllRequested);
+    void _managerSendCompleteWithOperationId  (quint64 operationId, bool error);
+    void _managerRemoveAllCompleteWithOperationId(quint64 operationId, bool error);
     void _managerLoadComplete       (void);
     void _updateContainsItems       (void);
     void _managerSendComplete       (bool error);
@@ -114,6 +118,8 @@ private:
     Fact                _breachReturnAltitudeFact;
     double              _breachReturnDefaultAltitude =  qQNaN();
     bool                _itemsRequested =               false;
+    quint64             _operationId =                  0;
+    bool                _operationPending =            false;
 
     Fact*               _px4ParamCircularFenceFact =        nullptr;
     Fact*               _apmParamCircularFenceRadiusFact =  nullptr;

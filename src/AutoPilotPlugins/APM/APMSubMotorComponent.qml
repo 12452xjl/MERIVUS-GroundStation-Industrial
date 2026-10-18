@@ -30,17 +30,58 @@ SetupPage {
     property int _lastIndex: 0;
     property bool canRunManualTest: controller.vehicle.flightMode !== 'Motor Detection' && controller.vehicle.armed && motorPage.visible && setupView.visible
     property var shouldRunManualTest: false // Does the operator intend to run the motor test?
+    property bool _safetySwitchGuard: false
+
+    // Automatic direction detection arms the vehicle and immediately spins
+    // the motors. Keep both the button and the confirmation callback behind
+    // the same live maintenance gate so a stale setup page cannot start it
+    // after a link loss, arm state change, or cooldown transition.
+    function _maintenanceGateOpen() {
+        var vehicle = controller ? controller.vehicle : null
+        return vehicle
+                && vehicle.initialConnectComplete
+                && vehicle.vehicleLinkManager
+                && !vehicle.vehicleLinkManager.communicationLost
+                && !vehicle.armed
+                && !vehicle.flying
+                && !coolDownTimer.running
+    }
+
+    function _startAutomaticDetection() {
+        if (!_maintenanceGateOpen() || controller.vehicle.flightMode === 'Motor Detection') {
+            return
+        }
+        mainWindow.showMessageDialog(qsTr("Automatic Motor Direction Detection"),
+                                     qsTr("This maintenance action will arm the vehicle and spin the motors. Remove all propellers, keep the area clear, and confirm that the vehicle is disarmed and grounded before continuing."),
+                                     StandardButton.Ok | StandardButton.Cancel,
+                                     function() {
+                                         if (_maintenanceGateOpen() && controller.vehicle.flightMode !== 'Motor Detection') {
+                                             controller.vehicle.flightMode = "Motor Detection"
+                                             controller.vehicle.armed = true
+                                         }
+                                     })
+    }
 
     APMSubMotorComponentController {
         id:             controller
     }
 
     function setMotorDirection(num, reversed) {
+        if (!_maintenanceGateOpen()) {
+            console.warn("Motor direction change blocked: vehicle is not in a grounded maintenance state")
+            return
+        }
         var fact = controller.getParameterFact(-1, "MOT_" + num + "_DIRECTION")
         fact.value = reversed ? -1 : 1;
     }
 
-    Component.onCompleted: controller.vehicle.armed = false
+    // Opening a setup page must never issue an unsolicited DISARM command.
+    // The operator or the vehicle safety state owns arming transitions.
+    Component.onCompleted: {
+        if (controller.vehicle && controller.vehicle.armed) {
+            console.warn("Motor setup opened while vehicle is armed; no automatic disarm was sent")
+        }
+    }
 
     Component {
         id: pageComponent
@@ -169,14 +210,42 @@ SetupPage {
                 Switch {
                     id: safetySwitch
                     onToggled: {
-                        if (controller.vehicle.armed) {
+                        if (_safetySwitchGuard) {
+                            return
+                        }
+                        if (!checked) {
+                            if (controller.vehicle.flying) {
+                                _safetySwitchGuard = true
+                                checked = true
+                                _safetySwitchGuard = false
+                                return
+                            }
                             shouldRunManualTest = false
-                            enabled = false
-                            coolDownTimer.start()
+                            controller.vehicle.armed = false
+                            return
                         }
 
-                        controller.vehicle.armed = checked
-                        checked = controller.vehicle.armed // Makes the switch stay off if it's not possible to arm
+                        if (!motorPage._maintenanceGateOpen()) {
+                            _safetySwitchGuard = true
+                            checked = false
+                            _safetySwitchGuard = false
+                            return
+                        }
+
+                        // Arming is a physical-effect action: require a
+                        // second confirmation and re-check the live state in
+                        // the callback.
+                        _safetySwitchGuard = true
+                        checked = false
+                        _safetySwitchGuard = false
+                        mainWindow.showMessageDialog(qsTr("Arm for motor test"),
+                                                     qsTr("This will arm the vehicle and enable motor testing. Remove all propellers and keep the area clear before continuing."),
+                                                     StandardButton.Ok | StandardButton.Cancel,
+                                                     function() {
+                                                         if (motorPage._maintenanceGateOpen()) {
+                                                             controller.vehicle.armed = true
+                                                         }
+                                                     })
                     }
                 }
 
@@ -237,12 +306,9 @@ SetupPage {
                     QGCButton {
                         id: startAutoDetection
                         text: qsTr("Auto-Detect Directions")
-                        enabled: controller.vehicle.flightMode !== 'Motor Detection'
+                        enabled: controller.vehicle.flightMode !== 'Motor Detection' && motorPage._maintenanceGateOpen()
 
-                        onClicked: function() {
-                            controller.vehicle.flightMode = "Motor Detection"
-                            controller.vehicle.armed = true
-                        }
+                        onClicked: motorPage._startAutomaticDetection()
                     }
                 }
                 Column {

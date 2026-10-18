@@ -22,8 +22,11 @@
 #include "PlanViewSettings.h"
 #include "HealthAndArmingCheckReport.h"
 #include "VehicleGPSFactGroup.h"
+#include "Vehicle.h"
+#include "VehicleLinkManager.h"
 
 #include <QDebug>
+#include <QThread>
 
 #include "px4_custom_mode.h"
 
@@ -43,6 +46,110 @@ bool isRejectedCommandRefreshStage(PX4TakeoffHealthCheckStage stage)
 {
     return stage == PX4TakeoffHealthCheckStage::RefreshAfterTakeoffRejection
         || stage == PX4TakeoffHealthCheckStage::RefreshAfterArmRejection;
+}
+
+// Each handler belongs to one actual queued request, not to the global 511
+// signal. Vehicle owns the context until that request terminates or closes.
+class EscIntervalRequest final : public QObject
+{
+public:
+    EscIntervalRequest(const QPointer<Vehicle>& actualVehicle,
+                       const QPointer<PX4FirmwarePluginInstanceData>& actualInstance,
+                       const QPointer<VehicleLinkManager>& actualLinks,
+                       const QPointer<LinkInterface>& actualPrimary,
+                       const WeakLinkInterfacePtr& actualOwner, const QString& actualEpoch, int actualMessageId)
+        : QObject()
+        , vehicle(actualVehicle), instance(actualInstance), links(actualLinks)
+        , primary(actualPrimary), primaryOwner(actualOwner), sourceEpoch(actualEpoch), messageId(actualMessageId)
+    {
+    }
+
+    const QPointer<Vehicle> vehicle;
+    const QPointer<PX4FirmwarePluginInstanceData> instance;
+    const QPointer<VehicleLinkManager> links;
+    const QPointer<LinkInterface> primary;
+    const WeakLinkInterfacePtr primaryOwner;
+    const QString sourceEpoch;
+    const int messageId;
+    bool finished = false;
+};
+
+bool escIntervalContextCurrent(const QPointer<Vehicle>& vehicle,
+                               const QPointer<PX4FirmwarePluginInstanceData>& instance,
+                               const QPointer<VehicleLinkManager>& links,
+                               const QPointer<LinkInterface>& primary,
+                               const WeakLinkInterfacePtr& owner, const QString& sourceEpoch)
+{
+    if (!vehicle || !instance || !links || !primary || owner.expired()
+        || sourceEpoch.isEmpty() || vehicle->autopilotVersionObservationSourceEpochMemory() != sourceEpoch
+        || QThread::currentThread() != vehicle->thread() || instance->thread() != vehicle->thread()
+        || links->thread() != vehicle->thread() || vehicle->firmwarePluginInstanceData() != instance.data()
+        || vehicle->vehicleLinkManager() != links.data() || instance->parent() != vehicle.data()) return false;
+    const WeakLinkInterfacePtr current = links->primaryLink();
+    const SharedLinkInterfacePtr retained = current.lock();
+    return retained && retained.get() == primary.data()
+        && !current.owner_before(owner) && !owner.owner_before(current);
+}
+
+void requestEscInterval(QPointer<Vehicle> vehicle, QPointer<PX4FirmwarePluginInstanceData> instance,
+                        QPointer<VehicleLinkManager> links, QPointer<LinkInterface> primary,
+                        WeakLinkInterfacePtr owner, QString sourceEpoch, int messageId);
+
+void escIntervalResult(void* resultHandlerData, int component, const mavlink_command_ack_t& ack,
+                       Vehicle::MavCmdResultFailureCode_t failureCode)
+{
+    const QPointer<EscIntervalRequest> request(static_cast<EscIntervalRequest*>(resultHandlerData));
+    if (!request || request->finished) return;
+    request->finished = true;
+    // Freeze owned values before deleting the one-shot context. Destruction
+    // notifications may remove the Vehicle, replace its instance or source.
+    const QPointer<Vehicle> vehicle = request->vehicle;
+    const QPointer<PX4FirmwarePluginInstanceData> instance = request->instance;
+    const QPointer<VehicleLinkManager> links = request->links;
+    const QPointer<LinkInterface> primary = request->primary;
+    const WeakLinkInterfacePtr owner = request->primaryOwner;
+    const QString sourceEpoch = request->sourceEpoch;
+    const bool own = vehicle && instance && request->parent() == vehicle.data()
+        && instance->escTelemetryIntervalRequest.data() == request.data();
+    const bool advance = own && request->messageId == MAVLINK_MSG_ID_ESC_STATUS
+        && failureCode == Vehicle::MavCmdResultCommandResultOnly
+        && component == MAV_COMP_ID_AUTOPILOT1 && ack.command == MAV_CMD_SET_MESSAGE_INTERVAL
+        && ack.result == MAV_RESULT_ACCEPTED
+        && escIntervalContextCurrent(vehicle, instance, links, primary, owner, sourceEpoch);
+    if (own) instance->escTelemetryIntervalRequest.clear();
+    delete request.data();
+    if (!advance || !escIntervalContextCurrent(vehicle, instance, links, primary, owner, sourceEpoch)
+        || !instance->escTelemetryRequestStarted || instance->escTelemetryIntervalRequest) return;
+    // An accepted ACK only advances our initialization sequence; it is not
+    // wire-causal attribution or proof that either stream rate was applied.
+    requestEscInterval(vehicle, instance, links, primary, owner, sourceEpoch, MAVLINK_MSG_ID_ESC_INFO);
+}
+
+void requestEscInterval(QPointer<Vehicle> vehicle, QPointer<PX4FirmwarePluginInstanceData> instance,
+                        QPointer<VehicleLinkManager> links, QPointer<LinkInterface> primary,
+                        WeakLinkInterfacePtr owner, QString sourceEpoch, int messageId)
+{
+    if ((messageId != MAVLINK_MSG_ID_ESC_STATUS && messageId != MAVLINK_MSG_ID_ESC_INFO)
+        || !escIntervalContextCurrent(vehicle, instance, links, primary, owner, sourceEpoch)
+        || !instance->escTelemetryRequestStarted || instance->escTelemetryIntervalRequest) return;
+    const QPointer<EscIntervalRequest> request(new EscIntervalRequest(vehicle, instance,
+        links, primary, owner, sourceEpoch, messageId));
+    // Parent adoption can invoke ChildAdded/destruction callbacks. Construct
+    // all fields without a parent first, then check the frozen context again.
+    request->setParent(vehicle.data());
+    if (!request || !escIntervalContextCurrent(vehicle, instance, links, primary, owner, sourceEpoch)
+        || request->parent() != vehicle.data() || instance->escTelemetryIntervalRequest) {
+        if (request) delete request.data();
+        return;
+    }
+    instance->escTelemetryIntervalRequest = request.data();
+    Vehicle::MavCmdAckHandlerInfo_t handler = {};
+    handler.resultHandler = &escIntervalResult;
+    handler.resultHandlerData = request.data();
+    vehicle->sendMavCommandWithHandler(&handler, MAV_COMP_ID_AUTOPILOT1, MAV_CMD_SET_MESSAGE_INTERVAL,
+        float(messageId), messageId == MAVLINK_MSG_ID_ESC_STATUS ? 200000.0f : 1000000.0f);
+    // No access after this call: a local failure may synchronously finish and
+    // delete the request, its owner, or both. IN_PROGRESS never advances it.
 }
 
 }
@@ -256,31 +363,41 @@ bool PX4FirmwarePlugin::isCapable(const Vehicle *vehicle, FirmwareCapabilities c
 
 void PX4FirmwarePlugin::initializeVehicle(Vehicle* vehicle)
 {
-    auto* instanceData = new PX4FirmwarePluginInstanceData;
-    vehicle->setFirmwarePluginInstanceData(instanceData);
+    const QPointer<Vehicle> escVehicle(vehicle);
+    const QPointer<VehicleLinkManager> escLinks(vehicle->vehicleLinkManager());
+    const QPointer<PX4FirmwarePlugin> plugin(this);
+    const QPointer<PX4FirmwarePluginInstanceData> escInstance(new PX4FirmwarePluginInstanceData);
+    const auto initializationCurrent = [escVehicle, escInstance, plugin]() {
+        return escVehicle && escInstance && plugin
+            && escVehicle->firmwarePluginInstanceData() == escInstance.data();
+    };
+    vehicle->setFirmwarePluginInstanceData(escInstance.data());
+    if (!initializationCurrent()) return;
 
     connect(vehicle, &Vehicle::mavCommandResult,
             this, &PX4FirmwarePlugin::_mavCommandResult,
             Qt::UniqueConnection);
+    if (!initializationCurrent()) return;
     connect(vehicle->healthAndArmingCheckReport(), &HealthAndArmingCheckReport::updated,
             vehicle, [this, vehicle]() { _takeoffHealthReportUpdated(vehicle); });
-    connect(&instanceData->takeoffHealthCheckTimer, &QTimer::timeout,
+    if (!initializationCurrent()) return;
+    connect(&escInstance->takeoffHealthCheckTimer, &QTimer::timeout,
             vehicle, [this, vehicle]() { _takeoffHealthCheckTimedOut(vehicle); });
+    if (!initializationCurrent()) return;
 
     // ESC messages are not part of every default PX4 stream. Request both the
     // fast measurements and the slow health data after the initial handshake.
-    const auto requestEscTelemetry = [vehicle]() {
-        auto* instanceData = qobject_cast<PX4FirmwarePluginInstanceData*>(vehicle->firmwarePluginInstanceData());
-        if (!instanceData) {
-            return;
-        }
-
-        instanceData->escStatusIntervalPending = true;
-        vehicle->sendMavCommand(MAV_COMP_ID_AUTOPILOT1,
-                                MAV_CMD_SET_MESSAGE_INTERVAL,
-                                false /* showError */,
-                                MAVLINK_MSG_ID_ESC_STATUS,
-                                200000.0f /* 5 Hz, microseconds */);
+    const auto requestEscTelemetry = [escVehicle, escInstance, escLinks]() {
+        if (!escVehicle || !escInstance || !escLinks
+            || escVehicle->firmwarePluginInstanceData() != escInstance.data()
+            || escInstance->escTelemetryRequestStarted) return;
+        escInstance->escTelemetryRequestStarted = true;
+        const QString sourceEpoch = escVehicle->autopilotVersionObservationSourceEpochMemory();
+        const WeakLinkInterfacePtr owner = escLinks->primaryLink();
+        const SharedLinkInterfacePtr primary = owner.lock();
+        if (!primary) return;
+        requestEscInterval(escVehicle, escInstance, escLinks, QPointer<LinkInterface>(primary.get()),
+                           owner, sourceEpoch, MAVLINK_MSG_ID_ESC_STATUS);
     };
 
     if (vehicle->isInitialConnectComplete()) {
@@ -435,18 +552,6 @@ void PX4FirmwarePlugin::_mavCommandResult(int vehicleId, int component, int comm
 
     auto* instanceData = qobject_cast<PX4FirmwarePluginInstanceData*>(vehicle->firmwarePluginInstanceData());
     if (!instanceData) {
-        return;
-    }
-
-    if (command == MAV_CMD_SET_MESSAGE_INTERVAL && instanceData->escStatusIntervalPending) {
-        // Vehicle serializes commands by command id, so request ESC_INFO only
-        // after the ESC_STATUS interval command has completed.
-        instanceData->escStatusIntervalPending = false;
-        vehicle->sendMavCommand(MAV_COMP_ID_AUTOPILOT1,
-                                MAV_CMD_SET_MESSAGE_INTERVAL,
-                                false /* showError */,
-                                MAVLINK_MSG_ID_ESC_INFO,
-                                1000000.0f /* 1 Hz, microseconds */);
         return;
     }
 
@@ -823,6 +928,11 @@ static void _pauseVehicleThenChangeAltResultHandler(void* resultHandlerData, int
             break;
         case Vehicle::MavCmdResultFailureDuplicateCommand:
             qDebug() << "Internal Error: MAV_CMD_DO_REPOSITION could not be sent due to duplicate command";
+            break;
+        case Vehicle::MavCmdResultFailureLateAckQuarantine:
+            qDebug() << "MAV_CMD_DO_REPOSITION blocked by delayed ACK quarantine";
+            break;
+        default:
             break;
         }
     }

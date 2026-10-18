@@ -4,8 +4,8 @@
 
 | 编号 | 级别 | 风险 | 当前证据 | 建议缓解 |
 | --- | --- | --- | --- | --- |
-| R-001 | P0 | AI 或 UI 绕过统一安全策略直接执行飞行动作 | AI 面板已进入 C++ proposal 策略和只显示建议；指挥中心仍可直接下发高度/速度/爬升 | 继续保持 AI `executable=false`；后续对非 AI 指挥中心入口增加确认、审计和权限 |
-| R-002 | P0 | 多机任务上传和启动缺少完整前置检查 | `SwarmController` 可上传临时任务并 `startMission` | 独立审计 `SwarmController`，增加 feature flag、确认、审计、Mock/SITL 验证 |
+| R-001 | P0 | AI 或 UI 绕过统一安全策略直接执行飞行动作 | AI 面板仍保持 proposal 策略和只显示建议；指挥中心高度/速度/起飞速度已收口到 `GuidedActionsController.requestControlCommand()`，具有冻结目标、人工确认、二次健康检查和审计，`MPC_TKO_SPEED` 还会做回读轮询；但普通参数仍等待真实 ACK 闭环，其他标准 Guided 入口和 `SwarmController` 仍需工程师验证，且 QML 函数/属性本身不是 C++ 权限隔离 | 继续保持 AI `executable=false`；工程师补齐参数/指令 ACK、超时和权限策略，并对其他高风险 Guided 入口执行同样的旁路审计 |
+| R-002 | P0 | 多机任务上传和启动缺少完整前置检查 | 标准任务启动已统一进入 `SwarmController::executeStartMission()` 事务；临时 Mission 上传后进入 `Starting`，等待启动 ACK/ Mission 模式遥测并在失败时清理；FleetRegistry 可用全球坐标或本地位置遥测作为位置证据，但这不证明全球任务坐标可用；标准启动现在在人工确认阶段锁定逐机 `missionStartSnapshot()` 指纹，并在事务创建/延迟发送前复核任务项、当前索引和指纹；仍缺真实 ACK/模式时序和 Mock/SITL 证明 | 工程师核对 `MAV_CMD_MISSION_START`、MissionManager 清理 ACK、全球/本地任务坐标语义、任务项一致性、快照锁拒绝路径、超时/重连和故障注入；完成后再考虑放行 |
 | R-003 | P1 | 编队协议与配套固件必须成对发布 | 协议 v2 使用 PREPARE/COMMIT/RELEASE/ABORT、成员位图、会话 ID、逐机 ACK 和来源绑定租约；仍使用通用 `MAV_CMD_USER_1～4` | 保持禁止 AI 调用；补充能力发现、SITL 故障注入和成对产物校验 |
 | R-004 | P0 | 真实飞机测试被自动化触发 | 用户描述已有实机无桨测试，但 Codex 禁止自动测试真实飞机 | 文档和流程中明确只用 Mock/SITL/回放；真实测试需人工授权 |
 | R-005 | P1 | 4G 链路延迟、卡顿、断线导致控制体验不稳定 | HyperLTE 手册提醒 4G 网络存在延迟和卡顿 | 阶段 1 做 Link 诊断、超时、错误提示；失联保护依赖 PX4 |
@@ -22,7 +22,7 @@
 
 ## 最大安全风险
 
-当前最大安全风险是高风险飞行动作入口已经散落在 QML 和 `SwarmController` 中，而统一 C++ 白名单、风险重算、确认、审计尚未形成。
+当前最大安全风险是高风险飞行动作在 `GuidedActionsController` 和 `SwarmController` 中仍然是多种执行路径；指挥中心参数卡的直接旁路已收口，但参数/指令 ACK 闭环、标准 Guided 入口的目标冻结和统一 C++ 白名单仍需继续工程师验证。
 
 ## 最大网络风险
 

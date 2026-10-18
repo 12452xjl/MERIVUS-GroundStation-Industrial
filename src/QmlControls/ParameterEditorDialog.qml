@@ -44,9 +44,23 @@ QGCPopupDialog {
 
     ParameterEditorController { id: controller; }
 
+    function _writeBlockReason() {
+        var reason = controller.writeBlockReason()
+        if (reason && reason.length > 0) {
+            return reason
+        }
+        return ""
+    }
+
     QGCPalette { id: qgcPal; colorGroupEnabled: true }
 
     onAccepted: {
+        var writeBlockReason = _writeBlockReason()
+        if (writeBlockReason.length > 0) {
+            mainWindow.showMessageDialog(qsTr("Parameter write blocked"), writeBlockReason)
+            preventClose = true
+            return
+        }
         if (bitmaskColumn.visible && !manualEntry.checked) {
             fact.value = bitmaskValue();
             fact.valueChanged(fact.value)
@@ -154,6 +168,11 @@ QGCPopupDialog {
                 text:       qsTr("Reset To Default")
 
                 onClicked: {
+                    var writeBlockReason = _writeBlockReason()
+                    if (writeBlockReason.length > 0) {
+                        mainWindow.showMessageDialog(qsTr("Parameter write blocked"), writeBlockReason)
+                        return
+                    }
                     fact.value = fact.defaultValue
                     fact.valueChanged(fact.value)
                     close()

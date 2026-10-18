@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QHash>
+#include <QString>
 #include <QStringList>
 #include <QVariantList>
 #include <QVariantMap>
@@ -24,19 +25,30 @@ public:
     int extensionCount() const { return _extensions.size(); }
     QVariantList extensions() const;
 
-    Q_INVOKABLE bool registerExtension(const QString& extensionId,
-                                       const QString& displayName,
-                                       const QString& version,
-                                       const QString& extensionType,
-                                       const QStringList& capabilities = QStringList(),
-                                       const QString& entryPoint = QString(),
-                                       const QVariantMap& metadata = QVariantMap());
-    Q_INVOKABLE bool removeExtension(const QString& extensionId);
-    Q_INVOKABLE bool setExtensionEnabled(const QString& extensionId, bool enabled);
+    /// C++ catalog-management API. Intentionally not Q_INVOKABLE: QML gets a
+    /// value snapshot only and cannot install, enable, remove, or replace an
+    /// extension behind the trust/sandbox boundary.
+    bool registerExtension(const QString& extensionId,
+                           const QString& displayName,
+                           const QString& version,
+                           const QString& extensionType,
+                           const QStringList& capabilities = QStringList(),
+                           const QString& entryPoint = QString(),
+                           const QVariantMap& metadata = QVariantMap());
+    bool removeExtension(const QString& extensionId);
+    bool setExtensionEnabled(const QString& extensionId, bool enabled);
     Q_INVOKABLE QVariantMap extension(const QString& extensionId) const;
     Q_INVOKABLE QVariantList findByType(const QString& extensionType) const;
     Q_INVOKABLE QVariantList findByCapability(const QString& capability) const;
     Q_INVOKABLE bool hasExtension(const QString& extensionId) const;
+    // Local metadata handoff only. Import never loads a binary or enables an
+    // extension implicitly; the caller must still make an explicit decision.
+    Q_INVOKABLE QVariantMap exportSnapshot() const;
+    bool importSnapshot(const QVariantMap& snapshot,
+                        bool replaceExisting = false);
+    bool saveToFile(const QString& filePath) const;
+    bool loadFromFile(const QString& filePath,
+                      bool replaceExisting = false);
 
 signals:
     void extensionsChanged();

@@ -122,12 +122,12 @@ signals:
 
 private slots:
     void _activeVehicleChanged      (Vehicle* activeVehicle);
-    void _loadMissionComplete       (void);
-    void _loadGeoFenceComplete      (void);
-    void _loadRallyPointsComplete   (void);
-    void _sendMissionComplete       (void);
-    void _sendGeoFenceComplete      (void);
-    void _sendRallyPointsComplete   (void);
+    void _loadMissionComplete       (quint64 operationId, bool removeAllRequested);
+    void _loadGeoFenceComplete      (quint64 operationId, bool removeAllRequested);
+    void _loadRallyPointsComplete   (quint64 operationId, bool removeAllRequested);
+    void _sendMissionComplete       (quint64 operationId, bool error);
+    void _sendGeoFenceComplete      (quint64 operationId, bool error);
+    void _sendRallyPointsComplete   (quint64 operationId, bool error);
     void _updatePlanCreatorsList    (void);
 
 private:
@@ -146,6 +146,12 @@ private:
     bool                    _loadRallyPoints =          false;
     bool                    _sendGeoFence =             false;
     bool                    _sendRallyPoints =          false;
+    bool                    _missionOperationPending =  false;
+    quint64                 _missionOperationId =       0;
+    bool                    _geoFenceOperationPending = false;
+    quint64                 _geoFenceOperationId =      0;
+    bool                    _rallyOperationPending =    false;
+    quint64                 _rallyOperationId =         0;
     QString                 _currentPlanFile;
     bool                    _deleteWhenSendCompleted =  false;
     QmlObjectListModel*     _planCreators =             nullptr;

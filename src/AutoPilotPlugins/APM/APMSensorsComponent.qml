@@ -32,8 +32,22 @@ SetupPage {
         id:             sensorsPageComponent
 
         Item {
+            id: sensorContent
             width:  availableWidth
             height: availableHeight
+
+            // Reboot is a maintenance write. Keep the same transport and
+            // ground-state boundary as the PX4 sensor setup path, including
+            // an execution-time recheck in each button handler below.
+            function _rebootWriteAllowed() {
+                var vehicle = controller.vehicle
+                return vehicle
+                        && vehicle.initialConnectComplete
+                        && vehicle.vehicleLinkManager
+                        && !vehicle.vehicleLinkManager.communicationLost
+                        && !vehicle.armed
+                        && !vehicle.flying
+            }
 
             // Help text which is shown both in the status text area prior to pressing a cal button and in the
             // pre-calibration dialog.
@@ -295,7 +309,14 @@ SetupPage {
 
                         QGCButton {
                             text:       qsTr("Reboot Vehicle")
+                            enabled:    sensorContent._rebootWriteAllowed()
                             onClicked: {
+                                if (!sensorContent._rebootWriteAllowed()) {
+                                    mainWindow.showMessageDialog(
+                                                qsTr("Restart blocked"),
+                                                qsTr("Vehicle must be connected, link-ready, disarmed and not flying before restart."))
+                                    return
+                                }
                                 controller.vehicle.rebootVehicle()
                                 postOnboardCompassCalibrationDialog.close()
                             }
@@ -324,7 +345,14 @@ SetupPage {
 
                         QGCButton {
                             text:       qsTr("Reboot Vehicle")
+                            enabled:    sensorContent._rebootWriteAllowed()
                             onClicked: {
+                                if (!sensorContent._rebootWriteAllowed()) {
+                                    mainWindow.showMessageDialog(
+                                                qsTr("Restart blocked"),
+                                                qsTr("Vehicle must be connected, link-ready, disarmed and not flying before restart."))
+                                    return
+                                }
                                 controller.vehicle.rebootVehicle()
                                 postCalibrationDialog.close()
                             }

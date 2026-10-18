@@ -20,6 +20,10 @@ CompInfo::CompInfo(COMP_METADATA_TYPE type, uint8_t compId, Vehicle* vehicle, QO
 
 void CompInfo::setUriMetaData(const QString &uri, uint32_t crc)
 {
+    if (uri.isEmpty()) {
+        _uris = {}; // No declaration: retire primary, fallback and translations.
+        return;
+    }
     _uris.uriMetaData = uri;
     _uris.crcMetaData = crc;
     _uris.crcMetaDataValid = true;

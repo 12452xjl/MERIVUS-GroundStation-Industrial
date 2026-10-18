@@ -29,9 +29,13 @@ MavlinkConsoleController::~MavlinkConsoleController()
     }
 }
 
-void
+bool
 MavlinkConsoleController::sendCommand(QString command)
 {
+    if (!commandAllowed()) {
+        qWarning() << "MAVLink console command blocked: vehicle is not connected or is armed/flying";
+        return false;
+    }
     // there might be multiple commands, add them separately to the history
     QStringList lines = command.split('\n');
     for (int i = 0; i < lines.size(); ++i) {
@@ -42,6 +46,18 @@ MavlinkConsoleController::sendCommand(QString command)
     command.append("\n");
     _sendSerialData(qPrintable(command));
     _cursor_home_pos = -1;
+    return true;
+}
+
+bool
+MavlinkConsoleController::commandAllowed() const
+{
+    return _vehicle
+            && _vehicle->isInitialConnectComplete()
+            && _vehicle->vehicleLinkManager()
+            && !_vehicle->vehicleLinkManager()->communicationLost()
+            && !_vehicle->armed()
+            && !_vehicle->flying();
 }
 
 QString

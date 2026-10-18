@@ -67,6 +67,9 @@ public:
     void                guidedModeChangeAltitude        (Vehicle* vehicle, double altitudeChange, bool pauseVehicle) override;
     bool                adjustIncomingMavlinkMessage    (Vehicle* vehicle, mavlink_message_t* message) override;
     void                adjustOutgoingMavlinkMessageThreadSafe(Vehicle* vehicle, LinkInterface* outgoingLink, mavlink_message_t* message) override;
+    // Native import transport only. Reports this actual plugin's current
+    // per-component quirk without inserting a map entry or authenticating it.
+    bool parameterSetEncodingMode(int systemId, int componentId, bool& numericFloat) const;
     virtual void        initializeStreamRates           (Vehicle* vehicle);
     void                initializeVehicle               (Vehicle* vehicle) override;
     bool                sendHomePositionToVehicle       (void) override;

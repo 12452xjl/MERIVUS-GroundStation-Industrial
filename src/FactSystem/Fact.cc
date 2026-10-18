@@ -15,8 +15,45 @@
 
 #include <QtQml>
 #include <QQmlEngine>
+#include <QPointer>
+#include <QMetaType>
+
+#include <cmath>
+#include <cstring>
+#include <limits>
 
 static const char* kMissingMetadata = "Meta data pointer missing";
+
+namespace {
+
+// Compare actual primitive representations, never a Fact's declared width
+// against arbitrary QVariant storage. This keeps typed zero and IEEE payloads
+// intact, and lets the notification tail recognize a committed NaN value.
+bool sameContainerValue(const QVariant& left, const QVariant& right)
+{
+    if (left.userType() != right.userType() || left.isNull() != right.isNull()) {
+        return false;
+    }
+    if (!left.isNull() && left.userType() == QMetaType::Float) {
+        static_assert(sizeof(float) == sizeof(quint32) && std::numeric_limits<float>::is_iec559,
+                      "Container float updates require IEEE binary32");
+        quint32 leftBits = 0, rightBits = 0;
+        std::memcpy(&leftBits, left.constData(), sizeof(leftBits));
+        std::memcpy(&rightBits, right.constData(), sizeof(rightBits));
+        return leftBits == rightBits;
+    }
+    if (!left.isNull() && left.userType() == QMetaType::Double) {
+        static_assert(sizeof(double) == sizeof(quint64) && std::numeric_limits<double>::is_iec559,
+                      "Container double updates require IEEE binary64");
+        quint64 leftBits = 0, rightBits = 0;
+        std::memcpy(&leftBits, left.constData(), sizeof(leftBits));
+        std::memcpy(&rightBits, right.constData(), sizeof(rightBits));
+        return leftBits == rightBits;
+    }
+    return left == right;
+}
+
+} // namespace
 
 Fact::Fact(QObject* parent)
     : QObject                   (parent)
@@ -106,16 +143,20 @@ const Fact& Fact::operator=(const Fact& other)
 
 void Fact::forceSetRawValue(const QVariant& value)
 {
+    QPointer<Fact> owner(this);
     if (_metaData) {
         QVariant    typedValue;
         QString     errorString;
         
         if (_metaData->convertAndValidateRaw(value, true /* convertOnly */, typedValue, errorString)) {
             _rawValue.setValue(typedValue);
+            const QVariant committedValue = _rawValue;
             _sendValueChangedSignal(cookedValue());
+            if (!owner || _rawValue != committedValue) return;
             //-- Must be in this order
-            emit _containerRawValueChanged(rawValue());
-            emit rawValueChanged(_rawValue);
+            emit _containerRawValueChanged(committedValue);
+            if (!owner || _rawValue != committedValue) return;
+            emit rawValueChanged(committedValue);
         }
     } else {
         qWarning() << kMissingMetadata << name();
@@ -124,6 +165,7 @@ void Fact::forceSetRawValue(const QVariant& value)
 
 void Fact::setRawValue(const QVariant& value)
 {
+    QPointer<Fact> owner(this);
     if (_metaData) {
         QVariant    typedValue;
         QString     errorString;
@@ -131,10 +173,13 @@ void Fact::setRawValue(const QVariant& value)
         if (_metaData->convertAndValidateRaw(value, true /* convertOnly */, typedValue, errorString)) {
             if (typedValue != _rawValue) {
                 _rawValue.setValue(typedValue);
+                const QVariant committedValue = _rawValue;
                 _sendValueChangedSignal(cookedValue());
+                if (!owner || _rawValue != committedValue) return;
                 //-- Must be in this order
-                emit _containerRawValueChanged(rawValue());
-                emit rawValueChanged(_rawValue);
+                emit _containerRawValueChanged(committedValue);
+                if (!owner || _rawValue != committedValue) return;
+                emit rawValueChanged(committedValue);
             }
         }
     } else {
@@ -179,14 +224,22 @@ void Fact::setEnumIndex(int index)
 
 void Fact::_containerSetRawValue(const QVariant& value)
 {
-    if(_rawValue != value) {
-        _rawValue = value;
-        _sendValueChangedSignal(cookedValue());
-        emit rawValueChanged(_rawValue);
+    QPointer<Fact> owner(this);
+    const QVariant committedValue = value;
+    if (!sameContainerValue(_rawValue, committedValue)) {
+        _rawValue = committedValue;
+        const QVariant committedCookedValue = cookedValue();
+        if (!owner || !sameContainerValue(_rawValue, committedValue)) return;
+        _sendValueChangedSignal(committedCookedValue);
+        if (!owner || !sameContainerValue(_rawValue, committedValue)) return;
+        emit rawValueChanged(committedValue);
+        if (!owner || !sameContainerValue(_rawValue, committedValue)) return;
     }
 
     // This always need to be signalled in order to support forceSetRawValue usage and waiting for vehicleUpdated signal
-    emit vehicleUpdated(_rawValue);
+    // Copy the signal argument: a direct listener can destroy this Fact and
+    // its manager, or install a different value before the next signal.
+    emit vehicleUpdated(committedValue);
 }
 
 QString Fact::name(void) const
@@ -674,8 +727,10 @@ void Fact::setSendValueChangedSignals (bool sendValueChangedSignals)
 void Fact::_sendValueChangedSignal(QVariant value)
 {
     if (_sendValueChangedSignals) {
-        emit valueChanged(value);
+        // Commit before callbacks: the Fact may be deleted, and a nested
+        // update must not have its deferred flag overwritten by this call.
         _deferredValueChangeSignal = false;
+        emit valueChanged(value);
     } else {
         _deferredValueChangeSignal = true;
     }

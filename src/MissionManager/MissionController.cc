@@ -33,6 +33,8 @@
 #include "TakeoffMissionItem.h"
 #include "PlanViewSettings.h"
 
+#include <QUuid>
+
 #define UPDATE_TIMEOUT 5000 ///< How often we check for bounding box changes
 
 QGC_LOGGING_CATEGORY(MissionControllerLog, "MissionControllerLog")
@@ -64,8 +66,16 @@ MissionController::MissionController(PlanMasterController* masterController, QOb
     , _appSettings          (qgcApp()->toolbox()->settingsManager()->appSettings())
 {
     _resetMissionFlightStatus();
+    _resumeSourceEpoch = QUuid::createUuid().toString(QUuid::WithoutBraces);
 
     _updateTimer.setSingleShot(true);
+
+    // A queued zero-delay callback may run inside a nested event loop while
+    // PlanManager is still finishing. Keep the continuation until its native
+    // stack actually unwinds, without spinning or consuming QML confirmation.
+    _resumeContinuationTimer.setInterval(100);
+    connect(&_resumeContinuationTimer, &QTimer::timeout,
+            this, &MissionController::_deliverResumeContinuation);
 
     connect(&_updateTimer,                                  &QTimer::timeout,                           this, &MissionController::_updateTimeout);
     connect(_planViewSettings->takeoffItemNotRequired(),    &Fact::rawValueChanged,                     this, &MissionController::_takeoffItemNotRequiredChanged);
@@ -1999,11 +2009,16 @@ void MissionController::_itemCommandChanged(void)
 
 void MissionController::_managerVehicleChanged(Vehicle* managerVehicle)
 {
+    _clearResumeContinuation();
+    _resumeReceipt = ResumeContinuation();
+    _resumeSourceEpoch = QUuid::createUuid().toString(QUuid::WithoutBraces);
     if (_managerVehicle) {
         _missionManager->disconnect(this);
         _managerVehicle->disconnect(this);
         _managerVehicle = nullptr;
         _missionManager = nullptr;
+        _missionOperationId = 0;
+        _missionOperationType = 0;
     }
 
     _managerVehicle = managerVehicle;
@@ -2013,15 +2028,22 @@ void MissionController::_managerVehicleChanged(Vehicle* managerVehicle)
     }
 
     _missionManager = _managerVehicle->missionManager();
-    connect(_missionManager, &MissionManager::newMissionItemsAvailable, this, &MissionController::_newMissionItemsAvailableFromVehicle);
-    connect(_missionManager, &MissionManager::sendComplete,             this, &MissionController::_managerSendComplete);
-    connect(_missionManager, &MissionManager::removeAllComplete,        this, &MissionController::_managerRemoveAllComplete);
+    connect(_missionManager, &MissionManager::operationStarted,            this, &MissionController::_missionOperationStarted);
+    connect(_missionManager, &MissionManager::newMissionItemsAvailableWithOperationId, this, &MissionController::_newMissionItemsAvailableWithOperationId);
+    connect(_missionManager, &MissionManager::sendCompleteWithOperationId,  this, &MissionController::_managerSendCompleteWithOperationId);
+    connect(_missionManager, &MissionManager::removeAllCompleteWithOperationId, this, &MissionController::_managerRemoveAllCompleteWithOperationId);
     connect(_missionManager, &MissionManager::inProgressChanged,        this, &MissionController::_inProgressChanged);
     connect(_missionManager, &MissionManager::progressPct,              this, &MissionController::_progressPctChanged);
     connect(_missionManager, &MissionManager::currentIndexChanged,      this, &MissionController::_currentMissionIndexChanged);
     connect(_missionManager, &MissionManager::lastCurrentIndexChanged,  this, &MissionController::resumeMissionIndexChanged);
-    connect(_missionManager, &MissionManager::resumeMissionReady,       this, &MissionController::resumeMissionReady);
-    connect(_missionManager, &MissionManager::resumeMissionUploadFail,  this, &MissionController::resumeMissionUploadFail);
+    connect(_missionManager, &MissionManager::resumeMissionReadyWithOperationId, this, &MissionController::_managerResumeMissionReadyWithOperationId);
+    connect(_missionManager, &MissionManager::resumeMissionUploadFailWithOperationId, this, &MissionController::_managerResumeMissionUploadFailWithOperationId);
+
+    // The initial vehicle load can already be in flight before this
+    // controller attaches. Capture its local identity so a completion from a
+    // previous transaction cannot refresh this controller accidentally.
+    _missionOperationId = _missionManager->activeOperationId();
+    _missionOperationType = _missionManager->inProgress() ? -1 : 0;
     connect(_managerVehicle, &Vehicle::defaultCruiseSpeedChanged,       this, &MissionController::_recalcMissionFlightStatusSignal, Qt::QueuedConnection);
     connect(_managerVehicle, &Vehicle::defaultHoverSpeedChanged,        this, &MissionController::_recalcMissionFlightStatusSignal, Qt::QueuedConnection);
     connect(_managerVehicle, &Vehicle::vehicleTypeChanged,              this, &MissionController::complexMissionItemNamesChanged);
@@ -2033,6 +2055,141 @@ void MissionController::_managerVehicleChanged(Vehicle* managerVehicle)
 void MissionController::_inProgressChanged(bool inProgress)
 {
     emit syncInProgressChanged(inProgress);
+}
+
+void MissionController::_missionOperationStarted(quint64 operationId, int transactionType)
+{
+    _resumeReceipt = ResumeContinuation();
+    if (_resumeContinuation.manager) {
+        if (_resumeDispatching && _resumeContinuation.operationId == 0
+            && sender() == _resumeContinuation.manager.data()
+            && transactionType == PlanManager::TransactionWrite && operationId != 0) {
+            // Capture the operation synchronously during our own generation,
+            // never attach a new request to an already-running upload.
+            _resumeContinuation.operationId = operationId;
+        } else {
+            _clearResumeContinuation();
+        }
+    }
+    _missionOperationId = operationId;
+    _missionOperationType = transactionType;
+}
+
+void MissionController::_newMissionItemsAvailableWithOperationId(quint64 operationId, bool removeAllRequested)
+{
+    if (operationId == 0 || operationId != _missionOperationId) {
+        qCDebug(MissionControllerLog)
+            << "Ignoring mission load completion for an unknown operation"
+            << operationId << _missionOperationId;
+        return;
+    }
+    _newMissionItemsAvailableFromVehicle(removeAllRequested);
+}
+
+void MissionController::_managerSendCompleteWithOperationId(quint64 operationId, bool error)
+{
+    if (operationId == 0 || operationId != _missionOperationId) {
+        qCDebug(MissionControllerLog)
+            << "Ignoring mission send completion for an unknown operation"
+            << operationId << _missionOperationId;
+        return;
+    }
+    _managerSendComplete(error);
+}
+
+void MissionController::_managerRemoveAllCompleteWithOperationId(quint64 operationId, bool error)
+{
+    if (operationId == 0 || operationId != _missionOperationId) {
+        qCDebug(MissionControllerLog)
+            << "Ignoring mission remove-all completion for an unknown operation"
+            << operationId << _missionOperationId;
+        return;
+    }
+    _managerRemoveAllComplete(error);
+}
+
+void MissionController::_managerResumeMissionReadyWithOperationId(quint64 operationId)
+{
+    if (operationId == 0 || operationId != _missionOperationId
+        || operationId != _resumeContinuation.operationId
+        || sender() != _resumeContinuation.manager.data()
+        || _missionManager != _resumeContinuation.manager.data()) {
+        qCDebug(MissionControllerLog)
+            << "Ignoring resume-ready completion for an unknown operation"
+            << operationId << _missionOperationId;
+        return;
+    }
+    _resumeContinuation.contentFingerprint =
+        PlanManager::missionItemsContentFingerprint(_missionManager->missionItems());
+    _resumeContinuation.uploadedItemCount = _missionManager->missionItems().count();
+    _resumeContinuation.completionPending = true;
+    _resumeContinuation.error = false;
+    _resumeContinuationTimer.start();
+}
+
+void MissionController::_managerResumeMissionUploadFailWithOperationId(quint64 operationId)
+{
+    if (operationId == 0 || operationId != _missionOperationId
+        || operationId != _resumeContinuation.operationId
+        || sender() != _resumeContinuation.manager.data()
+        || _missionManager != _resumeContinuation.manager.data()) {
+        qCDebug(MissionControllerLog)
+            << "Ignoring resume-upload-fail completion for an unknown operation"
+            << operationId << _missionOperationId;
+        return;
+    }
+    _resumeContinuation.completionPending = true;
+    _resumeContinuation.error = true;
+    _resumeContinuationTimer.start();
+}
+
+void MissionController::_clearResumeContinuation(void)
+{
+    _resumeContinuationTimer.stop();
+    _resumeContinuation = ResumeContinuation();
+    _resumeContinuationClock.invalidate();
+}
+
+void MissionController::_deliverResumeContinuation(void)
+{
+    const ResumeContinuation receipt = _resumeContinuation;
+    if (!receipt.manager || !receipt.vehicle || !receipt.completionPending
+        || _missionManager != receipt.manager.data()
+        || _managerVehicle != receipt.vehicle.data()
+        || receipt.operationId == 0 || _missionOperationId != receipt.operationId
+        || _missionOperationType != PlanManager::TransactionWrite
+        || !_resumeContinuationClock.isValid()
+        || _resumeContinuationClock.elapsed() > 120000) {
+        _clearResumeContinuation();
+        return;
+    }
+    if (_resumeDispatching || receipt.manager->transportCallInProgress()) return;
+    if (receipt.manager->inProgress()) {
+        _clearResumeContinuation();
+        return;
+    }
+
+    const bool contentValid = receipt.error
+        || (receipt.uploadedItemCount > 0 && !receipt.contentFingerprint.isEmpty()
+            && receipt.manager->lastAcknowledgedWriteOperationId() == receipt.operationId
+            && !receipt.manager->lastAcknowledgedWriteWasFreshUpload()
+            && receipt.manager->lastAcknowledgedWriteFingerprint() == receipt.contentFingerprint
+            && receipt.manager->missionItems().count() == receipt.uploadedItemCount
+            && PlanManager::missionItemsContentFingerprint(receipt.manager->missionItems())
+                == receipt.contentFingerprint);
+    _clearResumeContinuation(); // Consume before any direct-connected callback.
+    if (!contentValid) return;
+    if (!receipt.error) _resumeReceipt = receipt;
+    if (receipt.requestId.isEmpty()) {
+        // Compatibility consumers receive only the delayed legacy signal.
+        if (receipt.error) emit resumeMissionUploadFail();
+        else emit resumeMissionReady();
+    } else if (receipt.error) {
+        emit resumeMissionUploadFailForRequest(receipt.requestId, QString::number(receipt.operationId));
+    } else {
+        emit resumeMissionReadyForRequest(receipt.requestId, QString::number(receipt.operationId),
+                                         receipt.uploadedItemCount, receipt.contentFingerprint);
+    }
 }
 
 bool MissionController::_findPreviousAltitude(int newIndex, double* prevAltitude, QGroundControlQmlGlobal::AltMode* prevAltitudeMode)
@@ -2270,10 +2427,103 @@ QStringList MissionController::complexMissionItemNames(void) const
 
 void MissionController::resumeMission(int resumeIndex)
 {
-    if (!_controllerVehicle->firmwarePlugin()->sendHomePositionToVehicle()) {
-        resumeIndex--;
+    _beginResumeMission(resumeIndex, QString());
+}
+
+QVariantMap MissionController::resumeSourceSnapshot(QObject* expectedVehicle) const
+{
+    Vehicle* const vehicle = qobject_cast<Vehicle*>(expectedVehicle);
+    if (!vehicle || vehicle != _managerVehicle || !_missionManager
+        || vehicle->missionManager() != _missionManager
+        || _missionManager->inProgress() || _missionManager->transportCallInProgress()
+        || _missionManager->missionItems().isEmpty()) {
+        return QVariantMap{{QStringLiteral("valid"), false}};
     }
-    _missionManager->generateResumeMission(resumeIndex);
+    const QString fingerprint =
+        PlanManager::missionItemsContentFingerprint(_missionManager->missionItems());
+    if (fingerprint.isEmpty()) return QVariantMap{{QStringLiteral("valid"), false}};
+    return QVariantMap{{QStringLiteral("valid"), true},
+                       {QStringLiteral("sourceEpoch"), _resumeSourceEpoch},
+                       {QStringLiteral("contentFingerprint"), fingerprint},
+                       {QStringLiteral("itemCount"), _missionManager->missionItems().count()}};
+}
+
+bool MissionController::resumeMissionForRequest(int resumeIndex, const QString& requestId,
+                                             QObject* expectedVehicle, const QVariantMap& expectedSource)
+{
+    _clearResumeContinuation();
+    _resumeReceipt = ResumeContinuation();
+    Vehicle* const vehicle = qobject_cast<Vehicle*>(expectedVehicle);
+    if (requestId.isEmpty() || requestId.size() > 128 || requestId != requestId.trimmed()
+        || !vehicle || vehicle != _managerVehicle) {
+        return false;
+    }
+    const QVariantMap currentSource = resumeSourceSnapshot(vehicle);
+    const QVariant count = expectedSource.value(QStringLiteral("itemCount"));
+    const bool numericCount = count.type() == QVariant::Int || count.type() == QVariant::UInt
+        || count.type() == QVariant::LongLong || count.type() == QVariant::ULongLong
+        || count.type() == QVariant::Double;
+    if (expectedSource.size() != 4 || !currentSource.value(QStringLiteral("valid")).toBool()
+        || expectedSource.value(QStringLiteral("valid")).type() != QVariant::Bool
+        || !expectedSource.value(QStringLiteral("valid")).toBool()
+        || expectedSource.value(QStringLiteral("sourceEpoch")).type() != QVariant::String
+        || expectedSource.value(QStringLiteral("contentFingerprint")).type() != QVariant::String
+        || expectedSource.value(QStringLiteral("sourceEpoch")) != currentSource.value(QStringLiteral("sourceEpoch"))
+        || expectedSource.value(QStringLiteral("contentFingerprint")) != currentSource.value(QStringLiteral("contentFingerprint"))
+        || !numericCount || count.toDouble() != currentSource.value(QStringLiteral("itemCount")).toInt()) return false;
+    return _beginResumeMission(resumeIndex, requestId);
+}
+
+bool MissionController::_beginResumeMission(int resumeIndex, const QString& requestId)
+{
+    // Every attempted replacement invalidates an older continuation, even if
+    // the new request is blocked; its later ready signal cannot adopt a newer
+    // operator confirmation while reusing the old manager operation ID.
+    _clearResumeContinuation();
+    _resumeReceipt = ResumeContinuation();
+    if (_resumeDispatching || !_missionManager || !_managerVehicle || !_controllerVehicle
+        || _managerVehicle->missionManager() != _missionManager
+        || !_managerVehicle->firmwarePlugin() || resumeIndex < 0
+        || _missionManager->inProgress() || _missionManager->transportCallInProgress()) return false;
+    const int managerIndex = resumeIndex
+        - (_managerVehicle->firmwarePlugin()->sendHomePositionToVehicle() ? 0 : 1);
+    if (managerIndex < 0 || managerIndex >= _missionManager->missionItems().count()) return false;
+
+    QPointer<MissionController> owner(this);
+    QPointer<MissionManager> manager(_missionManager);
+    _resumeContinuation.manager = manager;
+    _resumeContinuation.vehicle = _managerVehicle;
+    _resumeContinuation.requestId = requestId;
+    _resumeContinuationClock.start();
+    _resumeDispatching = true;
+    manager->generateResumeMission(managerIndex);
+    if (!owner) return false;
+    _resumeDispatching = false;
+    const bool accepted = manager && _resumeContinuation.manager.data() == manager.data()
+        && _resumeContinuation.operationId != 0;
+    if (!accepted) _clearResumeContinuation();
+    return accepted;
+}
+
+bool MissionController::resumeUploadMatches(const QString& requestId, const QString& operationId,
+                                          const QString& contentFingerprint) const
+{
+    const ResumeContinuation& receipt = _resumeReceipt;
+    return !requestId.isEmpty() && requestId == receipt.requestId
+        && receipt.operationId != 0 && operationId == QString::number(receipt.operationId)
+        && !contentFingerprint.isEmpty() && contentFingerprint == receipt.contentFingerprint
+        && receipt.manager && receipt.vehicle
+        && receipt.manager.data() == _missionManager && receipt.vehicle.data() == _managerVehicle
+        && _missionOperationId == receipt.operationId
+        && _missionOperationType == PlanManager::TransactionWrite
+        && !_resumeDispatching && !receipt.manager->transportCallInProgress()
+        && !receipt.manager->inProgress()
+        && receipt.manager->lastAcknowledgedWriteOperationId() == receipt.operationId
+        && !receipt.manager->lastAcknowledgedWriteWasFreshUpload()
+        && receipt.manager->lastAcknowledgedWriteFingerprint() == receipt.contentFingerprint
+        && receipt.manager->missionItems().count() == receipt.uploadedItemCount
+        && PlanManager::missionItemsContentFingerprint(receipt.manager->missionItems())
+            == receipt.contentFingerprint;
 }
 
 QGeoCoordinate MissionController::plannedHomePosition(void) const

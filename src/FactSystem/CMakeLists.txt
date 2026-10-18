@@ -26,6 +26,10 @@ add_library(FactSystem
 	FactSystem.h
 	FactValueSliderListModel.cc
 	FactValueSliderListModel.h
+	OfflineParameterFile.cc
+	OfflineParameterFile.h
+	ParameterCacheFile.cc
+	ParameterCacheFile.h
 	ParameterManager.cc
 	ParameterManager.h
 	SettingsFact.cc

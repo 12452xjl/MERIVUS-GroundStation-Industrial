@@ -15,7 +15,9 @@
 #include "ComponentInformationCache.h"
 #include "ComponentInformationTranslation.h"
 
-#include <QElapsedTimer>
+#include <QPointer>
+
+#include <memory>
 
 Q_DECLARE_LOGGING_CATEGORY(ComponentInformationManagerLog)
 
@@ -24,6 +26,11 @@ class ComponentInformationManager;
 class CompInfo;
 class CompInfoParam;
 class CompInfoGeneral;
+struct ComponentMetadataArtifact;
+class ComponentMetadataArtifactWorker;
+struct ComponentInformationRequestSource;
+struct ComponentMetadataFileRequest;
+struct ComponentMetadataTranslationRequest;
 
 class RequestMetaDataTypeStateMachine : public StateMachine
 {
@@ -31,22 +38,17 @@ class RequestMetaDataTypeStateMachine : public StateMachine
 
 public:
     RequestMetaDataTypeStateMachine(ComponentInformationManager* compMgr);
+    ~RequestMetaDataTypeStateMachine() override;
 
     void        request     (CompInfo* compInfo);
     QString     typeToString(void);
-    CompInfo*   compInfo    (void) { return _compInfo; }
+    CompInfo*   compInfo    (void);
+    void advance() override;
 
     // Overrides from StateMachine
     int             stateCount      (void) const final;
     const StateFn*  rgStates        (void) const final;
     void            statesCompleted (void) const final;
-
-private slots:
-    void    _ftpDownloadComplete                (const QString& file, const QString& errorMsg);
-    void    _ftpDownloadProgress                (float progress);
-    void    _httpDownloadComplete               (QString remoteFile, QString localFile, QString errorMsg);
-    QString _downloadCompleteJsonWorker         (const QString& jsonFileName);
-    void _downloadAndTranslationComplete(QString translatedJsonTempFile, QString errorMsg);
 
 private:
     static void _stateRequestCompInfo           (StateMachine* stateMachine);
@@ -58,24 +60,41 @@ private:
     static void _stateRequestComplete           (StateMachine* stateMachine);
     static bool _uriIsMAVLinkFTP                (const QString& uri);
 
-    void _requestFile(const QString& cacheFileTag, bool crcValid, const QString& uri, QString& outputFileName);
+    bool _current() const;
+    bool _idle() const;
+    void _retire();
+    void _requestMessage(bool deprecated);
+    void _requestFile(const QString& cacheFileTag, bool crcValid, quint32 expectedCrc,
+                      const QString& uri, bool translation);
+    bool _fileCurrent(const std::shared_ptr<ComponentMetadataFileRequest>& request) const;
+    void _downloadFile(const std::shared_ptr<ComponentMetadataFileRequest>& request);
+    void _downloadComplete(const std::shared_ptr<ComponentMetadataFileRequest>& request,
+                           const QString& file, const QString& error);
+    void _startArtifact(const std::shared_ptr<ComponentMetadataFileRequest>& request,
+                        const QString& file, bool cacheHit);
+    void _finishArtifact(const std::shared_ptr<ComponentMetadataFileRequest>& request);
 
-    ComponentInformationManager*    _compMgr                    = nullptr;
-    CompInfo*                       _compInfo                   = nullptr;
+    QPointer<ComponentInformationManager> _compMgr;
+    QPointer<CompInfo>               _compInfo;
+    std::shared_ptr<ComponentInformationRequestSource> _source;
+    quint64                         _serial = 0;
+    bool                            _serialExhausted = false;
+    QPointer<QObject>               _messageOwner;
+    std::shared_ptr<ComponentMetadataFileRequest> _file;
+    bool                            _transportBusy = false;
+    bool                            _translationBusy = false;
+    std::shared_ptr<ComponentMetadataTranslationRequest> _translationRequest;
+    QMetaObject::Connection         _translationConnection;
+    std::shared_ptr<const ComponentMetadataArtifact> _metadataArtifact;
+    std::shared_ptr<const ComponentMetadataArtifact> _translationArtifact;
     QString                         _jsonMetadataFileName;
     QString                         _jsonMetadataTranslatedFileName;
-    bool                            _jsonMetadataCrcValid       = false;
     QString                         _jsonTranslationFileName;
-    bool                            _jsonTranslationCrcValid    = false;
-
-    QString*                        _currentFileName            = nullptr;
-    QString                         _currentCacheFileTag;
-    bool                            _currentFileValidCrc        = false;
-
-    QElapsedTimer                   _downloadStartTime;
 
     static const StateFn  _rgStates[];
     static const int      _cStates;
+
+    friend class ComponentInformationManager;
 };
 
 class ComponentInformationManager : public StateMachine
@@ -86,11 +105,12 @@ public:
     static constexpr int cachedFileMaxAgeSec = 3 * 24 * 3600; ///< 3 days
 
     ComponentInformationManager(Vehicle* vehicle);
+    ~ComponentInformationManager() override;
 
     typedef void (*RequestAllCompleteFn)(void* requestAllCompleteFnData);
 
-    void                requestAllComponentInformation  (RequestAllCompleteFn requestAllCompletFn, void * requestAllCompleteFnData);
-    Vehicle*            vehicle                         (void) { return _vehicle; }
+    void                requestAllComponentInformation  (RequestAllCompleteFn requestAllCompletFn, void * requestAllCompleteFnData, QObject* callbackOwner = nullptr);
+    Vehicle*            vehicle                         (void);
     CompInfoParam*      compInfoParam                   (uint8_t compId);
     CompInfoGeneral*    compInfoGeneral                 (uint8_t compId);
 
@@ -109,6 +129,9 @@ signals:
     void progressUpdate(float progress);
 
 private:
+    bool _sourceCurrent(const std::shared_ptr<ComponentInformationRequestSource>& source) const;
+    bool _resetParameterMetadata(const std::shared_ptr<ComponentInformationRequestSource>& source);
+    void _retireSource(const std::shared_ptr<ComponentInformationRequestSource>& source);
     void _stateRequestCompInfoComplete  (void);
     bool _isCompTypeSupported           (COMP_METADATA_TYPE type);
     void _updateAllUri                  ();
@@ -122,15 +145,22 @@ private:
     static void _stateRequestCompInfoActuators      (StateMachine* stateMachine);
     static void _stateRequestAllCompInfoComplete    (StateMachine* stateMachine);
 
-    Vehicle*                        _vehicle                    = nullptr;
+    QPointer<Vehicle>                _vehicle;
+    std::shared_ptr<ComponentInformationRequestSource> _source;
+    quint64                         _serial = 0;
+    bool                            _serialExhausted = false;
+    bool                            _entryBusy = false;
+    bool                            _destroying = false;
     RequestMetaDataTypeStateMachine _requestTypeStateMachine;
     RequestAllCompleteFn            _requestAllCompleteFn       = nullptr;
     void*                           _requestAllCompleteFnData   = nullptr;
-    QGCCachedFileDownload*          _cachedFileDownload         = nullptr;
+    QPointer<QObject>               _requestAllCompleteOwner;
+    bool                            _requestAllCompleteOwnerRequired = false;
+    QPointer<QGCCachedFileDownload> _cachedFileDownload;
     ComponentInformationCache&      _fileCache;
-    ComponentInformationTranslation* _translation               = nullptr;
+    QPointer<ComponentInformationTranslation> _translation;
 
-    QMap<uint8_t /* compId */, QMap<COMP_METADATA_TYPE, CompInfo*>> _compInfoMap;
+    QMap<uint8_t /* compId */, QMap<COMP_METADATA_TYPE, QPointer<CompInfo>>> _compInfoMap;
 
     static const StateFn                  _rgStates[];
     static const int                      _cStates;

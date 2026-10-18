@@ -13,7 +13,12 @@
 #include <QDir>
 #include <QTimer>
 #include <QQueue>
+#include <QPointer>
+#include <QFile>
 
+#include <memory>
+
+#include "QGCOwnedDownloadFile.h"
 #include "UASInterface.h"
 #include "QGCLoggingCategory.h"
 #include "QGCMAVLink.h"
@@ -21,6 +26,7 @@
 Q_DECLARE_LOGGING_CATEGORY(FTPManagerLog)
 
 class Vehicle;
+struct FTPDownloadRequest;
 
 class FTPManager : public QObject
 {
@@ -30,6 +36,7 @@ class FTPManager : public QObject
     
 public:
     FTPManager(Vehicle* vehicle);
+    ~FTPManager() override;
 
 	/// Downloads the specified file.
     ///     @param fromCompId Component id of the component to download from. If fromCompId is MAV_COMP_ID_ALL, then MAV_COMP_ID_AUTOPILOT1 is used.
@@ -46,7 +53,13 @@ public:
     /// Signals downloadComplete, commandError, commandProgress
     bool download(uint8_t fromCompId, const QString& fromURI, const QString& toDir, const QString& fileName="", bool checksize = true);
 
-    /// Cancel the current operation
+    // Native-only, single-transfer lease created by QGCOwnedDownloadFile.
+    // Never emits the legacy downloadComplete/commandProgress signals.
+    bool downloadUnique(uint8_t fromCompId, const QString& fromURI, const QString& requestId,
+                        const QGCOwnedDownloadFilePtr& output);
+    void cancelUnique(const QString& requestId);
+
+    /// Cancel the current legacy operation (never a downloadUnique request)
     /// This will emit downloadComplete() when done, and if there's currently a download in progress
     void cancel();
 
@@ -54,6 +67,7 @@ public:
 
 signals:
     void downloadComplete(const QString& file, const QString& errorMsg);
+    void uniqueDownloadComplete(QString requestId, QString localFile, QString errorMsg);
     
     // Signals associated with all commands
     
@@ -86,17 +100,17 @@ private:
     };
 
     struct DownloadState_t {
-        uint8_t                 sessionId;
-        uint32_t                expectedOffset;         ///< offset which should be coming next
-        uint32_t                bytesWritten;
+        uint8_t                 sessionId = 0;
+        uint32_t                expectedOffset = 0;         ///< offset which should be coming next
+        uint32_t                bytesWritten = 0;
         QList<MissingData_t>    rgMissingData;
         QString                 fullPathOnVehicle;      ///< Fully qualified path to file on vehicle
         QDir                    toDir;                  ///< Directory to download file to
         QString                 fileName;               ///< Filename (no path) for download file
-        uint32_t                fileSize;               ///< Size of file being downloaded
+        uint32_t                fileSize = 0;               ///< Size of file being downloaded
         QFile                   file;
-        int                     retryCount;
-        bool                    checksize;
+        int                     retryCount = 0;
+        bool                    checksize = true;
 
         bool inProgress() const { return fileSize > 0; }
 
@@ -112,6 +126,15 @@ private:
             file.close();
         }
     };
+
+    bool _beginDownload(uint8_t fromCompId, const QString& uri, const QString& directory,
+                        const QString& fileName, bool checksize, const QString& requestId,
+                        const QGCOwnedDownloadFilePtr& output);
+    bool _current(const std::shared_ptr<FTPDownloadRequest>& request, quint64 phase = 0) const;
+    void _cancel(const std::shared_ptr<FTPDownloadRequest>& request);
+    bool _writeData(const std::shared_ptr<FTPDownloadRequest>& request, const MavlinkFTP::Request& packet);
+    bool _checkUniqueDeadline(const std::shared_ptr<FTPDownloadRequest>& request);
+    void _uniqueDeadlineTimeout();
 
 
     void    _mavlinkMessageReceived     (const mavlink_message_t& message);
@@ -130,13 +153,13 @@ private:
     void    _resetSessionsAckOrNak      (const MavlinkFTP::Request* ackOrNak);
     void    _resetSessionsTimeout       (void);
     QString _errorMsgFromNak            (const MavlinkFTP::Request* nak);
-    void    _sendRequestExpectAck       (MavlinkFTP::Request* request);
+    bool    _sendRequestExpectAck       (MavlinkFTP::Request* request);
     void    _downloadCompleteNoError    (void) { _downloadComplete(QString()); }
     void    _downloadComplete           (const QString& errorMsg);
     void    _emitErrorMessage           (const QString& msg);
     void    _fillRequestDataWithString(MavlinkFTP::Request* request, const QString& str);
-    void    _fillMissingBlocksWorker    (bool firstRequest);
-    void    _burstReadFileWorker        (bool firstRequest);
+    bool    _fillMissingBlocksWorker    (bool firstRequest);
+    bool    _burstReadFileWorker        (bool firstRequest);
     bool    _parseURI                   (uint8_t fromCompId, const QString& uri, QString& parsedURI, uint8_t& compId);
 
     void    _terminateSessionBegin      (void);
@@ -144,13 +167,19 @@ private:
     void    _terminateSessionTimeout    (void);
     void    _terminateComplete          (void);
 
-    Vehicle*                _vehicle;
+    QPointer<Vehicle>       _vehicle;
     uint8_t                 _ftpCompId = MAV_COMP_ID_AUTOPILOT1;
     QList<StateFunctions_t> _rgStateMachine;
     DownloadState_t         _downloadState;
     QTimer                  _ackOrNakTimeoutTimer;
+    QTimer                  _uniqueDeadlineTimer;
     int                     _currentStateMachineIndex   = -1;
     uint16_t                _expectedIncomingSeqNumber  = 0;
+    std::shared_ptr<FTPDownloadRequest> _request;
+    quint64                 _serial = 0;
+    bool                    _serialExhausted = false;
+    bool                    _entryBusy = false;
+    bool                    _destroying = false;
     
     static const int _ackOrNakTimeoutMsecs  = 1000;
     static const int _maxRetry              = 3;

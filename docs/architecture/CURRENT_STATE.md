@@ -1,6 +1,11 @@
 # MERIVUS 当前状态
 
-更新时间：2026-09-24
+更新时间：2026-10-06
+
+Fleet OS 目标的逐项源码 groundwork、当前缺口和验收边界以
+[`MERIVUS_FLEET_OS_ROADMAP.md`](../MERIVUS_FLEET_OS_ROADMAP.md) 与
+[`MERIVUS_SWARM_TARGET_MATRIX.md`](../MERIVUS_SWARM_TARGET_MATRIX.md) 为准；本页
+是系统级总览，不替代这两份逐项契约。
 
 当前版本：`0.1.0-dev.1`
 
@@ -22,12 +27,32 @@ MERIVUS 已从早期界面原型进入“可构建、可本地联调、具备明
 - 飞行视图与设置页面共享的全局 AI 悬浮入口。
 - MERIVUS 集群控制第一阶段模块：`FleetRegistry`、`CommandTransaction`、
   `SwarmMissionOrchestrator`、`FormationPlanner` 和 `FaultToleranceManager`。
-- Fleet OS 产品层基础模块：`FleetIntentTask`、`FleetCapabilityMatcher`、`FleetRiskRadar`、
-  `FleetEventBlackBox`、`FleetTimelineReplay`、`FleetMissionSimulator`、`MissionHandoffManager`、
-  `FleetRolePolicy`、`FleetTaskTemplateRegistry` 和 `FleetExtensionRegistry`。这些模块只生成
-  方案、风险、审计和权限结果，不绕过人工确认或直接释放飞行命令。
+- Fleet OS 产品层基础模块：`FleetIntentTask`、`FleetCapabilityDiscovery`、
+  `FleetCapabilityMatcher`、`FleetHealthCenter`、`FleetMissionCompiler`、
+  `FleetRoleAllocator`、`FleetEnergyScheduler`、`FleetAirspaceConflictChecker`、
+  `FleetMissionRiskEvaluator`、`FleetLinkDegradationPolicy`、
+  `FleetMissionContinuityPlanner`、`FleetEventRuleEngine`、`FleetEventBlackBox`、
+  `FleetTimelineReplay`、`FleetMissionSimulator`、`FleetMissionDigitalTwin`、
+  `FleetMissionEvidenceChain`、`FleetMissionReportBuilder`、`MissionHandoffManager`,
+  `FleetMaintenancePassport`、`FleetOperationalMemory`、`FleetRolePolicy`、
+  `FleetTaskTemplateRegistry`、`FleetExtensionRegistry`、只读
+  `FleetAutonomyPolicy` 和 `FleetMissionReviewCoordinator`。
+  这些模块只生成方案、风险、审计、维护和权限结果，不绕过人工确认或直接释放飞行命令。
+- `FleetMissionReviewCoordinator` 将角色分配、任务编译、能量、空域、风险和报告组成一次
+  可追溯的只读审阅；GuidedActionsController 的意图预览只记录该结果，缺失证据保持
+  `needsReview`，不连接 `SwarmController`。
+- `FleetAutonomyPolicy` 固定描述人工、辅助、监督和自动化阶段，以及 PX4/ArduPilot/伴随插件的
+  能力、权限、签名和沙箱占位；当前签名状态为未验证、沙箱为待接入，所有结果保持
+  `flightCommandReleased=false`。
 - 人工批量起飞/降落/返航/直接指点与编队阶段使用事务 ID；完成状态分别由 MAVLink ACK
   或飞行模式遥测确认，不能把“已发送”当作“已完成”。
+- 地图单机或框选 Goto（含普通右键指点）现在冻结确认时的目标 ID 集合与坐标，与批量/临时 Goto 共用
+  FleetHealthCenter 双阶段门禁和 `SwarmController::executeGoto()` 事务路径；掉线/低电量回调只生成带任务
+  revision 的连续性建议，不自动暂停或重分配任务。
+- 连续性任务编排器只在 `GuidedActionsController` 内部保持可变对象；其他 QML 只能读取任务摘要。控制器提供
+  `applyContinuitySuggestion(suggestionId, true)` 作为人工复核接缝，重新解析当前建议并核对来源 revision 后才允许
+  成员重分配，且该入口未接入面板自动动作或飞行命令释放。
+- 指挥中心以只读值快照显示模板、扩展和分级自主目录；事件规则支持版本化本地快照，导入不恢复冷却状态。
 - 地图、指挥中心和 Guided Actions 共享同一个 `SwarmController` 实例；多机列表保持可见。
 
 ### AI Assistant
@@ -37,6 +62,7 @@ MERIVUS 已从早期界面原型进入“可构建、可本地联调、具备明
 - 用户与助手消息气泡、消息数量管理和清空历史。
 - 本地规则模式、Agent 模式、Provider 配置和运行状态展示。
 - 参数解释、基础问答和结构化建议展示。
+- AI proposal 与本地规则模式待确认建议均可在操作员显式点击后生成 Fleet OS 只读审阅草稿；申请/批准仍受同一 `taskId/planId` 与 `needsReview=false` 约束，不上传任务或释放命令。
 - QGC C++ `AiAgentClient` 负责 HTTP 通信，QML 不直接承担 Agent 网络请求。
 
 ### Local Agent
@@ -68,6 +94,7 @@ MERIVUS 已从早期界面原型进入“可构建、可本地联调、具备明
 - AI 不直接发送 MAVLink，不修改 PX4 参数。
 - AI 不调用 Vehicle、SwarmController 或其他飞行动作入口。
 - proposal 只用于显示和预览，不代表执行结果。
+- Fleet OS 审阅草稿只生成风险/健康/能量/空域/报告快照，不能视为飞行批准。
 - 真实飞行功能必须经过独立确认框架、审计、SITL 回归和人工安全评审。
 - 真实凭据、生产坐标、飞行日志、模型文件和构建产物不得进入仓库。
 

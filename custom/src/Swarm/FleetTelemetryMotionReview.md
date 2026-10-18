@@ -1,0 +1,15 @@
+# 单页遥测运动报告值摘要
+
+## 486：真实native完成页的纯只读消费者
+
+[源](FleetTelemetryMotionReview.cc)／[头](FleetTelemetryMotionReview.h)提供非QObject、非invokable的static review(nativePage,positionValuesConfirmed)。由[Archive](FleetTelemetryArchive.md)实际消费完成页调用；不读文件、不注册observer、不收live、不导入JSON或授予权限。值型校验不认证调用者／档案来源。
+
+输入完整exact36 native页，row exact29，最多256帧／32来源，8MiB树与JSON上限、每行4096字节。完整页、三种计数、source／cursor／顺序／原recordConsistent先全检，再把原len payload复制到全零MAVLink容器用本地generated decode；MAVLink2合法截尾不被MIN_LEN误拒，不修改原归档或宣称CRC认证。结构失败整份空groups，不救前缀。
+
+只解释32 LOCAL_POSITION_NED及85 POSITION_TARGET_LOCAL_NED；85仅LOCAL_NED1／已知mask，活动字段有限，ignored字段不参与统计，全ignore仅合法消息计数、XY数值仍未知。有限float32进入double，不添加任意物理上限或配对／插值。源epoch＋sysid＋compid仅内部key；不同stream boot独立比较，重复／回退（含wrap）、接收时钟回退、mask变化和坏motion均断段清锚，坏样本自身保无值段。分页不累计，32无reset计数所以不能推断原点未变。
+
+输出固定31：schemaVersion、source、ok、reason、positionValuesConfirmed、rowCount、motionRowCount、acceptedPositionSamples、acceptedTargetSamples、rejectedMotionSamples、groupCount、segmentCount、groups，historicalOnly／singlePageOnly true，rawPayloadExposed／absoluteCoordinatesExposed／authenticated／crcVerified／taskOwnershipVerified／resetFreeVerified／driftDiagnosed／trajectorySafetyVerified／executionPermit／flightCommandReleased false，再有queryId／catalogId／runId／fileHash／afterSequence／nextSequence六原页身份。source=merivus-fleet-telemetry-motion-review；schemaVersion1，成功reason空。
+
+group exact5为groupOrdinal／vehicleId／componentId／segmentCount／segments；segment exact16为segmentOrdinal／breakReason／positionSampleCount／positionReceiveSpanMs／positionReceiveMaxGapMs／maxHorizontalDisplacementMeters／maxVerticalDisplacementMeters／maxHorizontalSpeedMps／maxVerticalSpeedMps／targetSampleCount／targetPositionSampleCount／targetVelocitySampleCount／targetReceiveSpanMs／targetReceiveMaxGapMs／maxHorizontalTargetChangeMeters／maxHorizontalTargetSpeedMps。时间是报告样本地面接收跨度／间隔，不是飞行时长；位移是相对段首报告值，非真实位移／悬停误差。无可用指标-1；单样本anchor／span0，gap不足两样本仍-1。
+
+没有raw／UTC／绝对坐标／actual epoch输出，也没有漂移、风、断桨原因、实测最大能力、完整遥测、任务完成或轨迹安全认证。不替代ULog。32工程场景全部未执行；仅静态源码与工程交接；未编译、运行helper／解析器／业务／模型／QML／应用／认证／SQL、测试、仿真、硬件操作、PX4修改、刷机或放行，未提交、更新PR或打包。

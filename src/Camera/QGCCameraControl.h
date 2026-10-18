@@ -13,10 +13,17 @@
 
 #include "QGCApplication.h"
 #include <QLoggingCategory>
+#include <QPointer>
+#include "LinkInterface.h"
 
 class QDomNode;
 class QDomNodeList;
 class QGCCameraParamIO;
+class QGCCameraManager;
+class VehicleLinkManager;
+class MAVLinkProtocol;
+class QGCToolbox;
+class VideoManager;
 
 Q_DECLARE_LOGGING_CATEGORY(CameraControlLog)
 Q_DECLARE_LOGGING_CATEGORY(CameraControlVerboseLog)
@@ -38,8 +45,8 @@ public:
     Q_PROPERTY(qreal        hfov                READ hfov               NOTIFY infoChanged)
     Q_PROPERTY(bool         isThermal           READ isThermal          NOTIFY infoChanged)
 
-    QString uri             () { return QString(_streamInfo.uri);  }
-    QString name            () { return QString(_streamInfo.name); }
+    QString uri             () const;
+    QString name            () const;
     qreal   aspectRatio     () const;
     qreal   hfov            () const{ return _streamInfo.hfov; }
     int     type            () const{ return _streamInfo.type; }
@@ -52,7 +59,9 @@ signals:
     void    infoChanged     ();
 
 private:
-    mavlink_video_stream_information_t _streamInfo;
+    friend class QGCCameraControl;
+    mavlink_video_stream_information_t _streamInfo{};
+    mavlink_video_stream_information_t _lastInformation{};
 };
 
 //-----------------------------------------------------------------------------
@@ -255,6 +264,9 @@ public:
     virtual int          currentStream      () { return _currentStream; }
     virtual void         setCurrentStream   (int stream);
     virtual bool         autoStream         ();
+    // Native local continuation fence only: not a remote receipt or permit.
+    quint64 streamSelectionEpoch() const { return _streamEpoch; }
+    QmlObjectListModel* streamModelNative() { return !_streamDestroying && !_streamExhausted ? &_streams : nullptr; }
     virtual quint32      recordTime         () { return _recordTime; }
     virtual QString      recordTimeStr      ();
 
@@ -358,6 +370,50 @@ protected slots:
     virtual void    _checkForVideoStreams   ();
 
 private:
+    struct StreamOperation {
+        QPointer<Vehicle> vehicle;
+        QPointer<QGCCameraManager> manager;
+        QPointer<VehicleLinkManager> links;
+        QPointer<MAVLinkProtocol> protocol;
+        QPointer<QObject> parent;
+        QPointer<LinkInterface> primary;
+        WeakLinkInterfacePtr primaryOwner;
+        quint64 epoch = 0, managerEpoch = 0;
+        int selection = 0, componentId = 0, vehicleId = 0;
+        bool parentRequired = false, hadPrimary = false;
+    };
+    bool _advanceStreamEpoch();
+    bool _advanceStreamStatusEpoch();
+    bool _advanceCameraModeEpoch();
+    void _requestCameraMode(CameraMode requestedMode);
+    QPointer<Fact> _ownedCameraModeFact() const;
+    void _invalidateStreamSource();
+    StreamOperation _streamOperation() const;
+    bool _streamOperationCurrent(const StreamOperation& operation) const;
+    QPointer<QGCVideoStreamInfo> _ownedStream(QObject* candidate) const;
+    QPointer<QGCVideoStreamInfo> _streamAtSelection(int selection);
+    int _streamSelectionIndex(const QPointer<QGCVideoStreamInfo>& selected);
+    void _streamDestroyed(QObject* original);
+    void _queueRetiredStreamCleanup();
+    void _cleanupRetiredStreams();
+    QPointer<QGCCameraManager> _streamManager;
+    QPointer<VehicleLinkManager> _streamLinks;
+    QPointer<MAVLinkProtocol> _streamProtocol;
+    QPointer<QGCToolbox> _streamToolbox;
+    QPointer<VideoManager> _streamVideoManager;
+    bool _streamManagerRequired = false, _streamLinksRequired = false;
+    bool _streamProtocolRequired = false, _streamDestroying = false, _streamExhausted = false;
+    bool _streamStructuralBusy = false;
+    bool _streamRowsRetired = false, _streamCleanupQueued = false;
+    bool _streamSelectionRetired = false;
+    QObject _streamTombstone;
+    QPointer<QGCVideoStreamInfo> _selectedStreamIdentity;
+    quint64 _streamEpoch = 0, _streamStatusEpoch = 0;
+    quint64 _cameraModeEpoch = 0;
+    bool _cameraModeEpochExhausted = false;
+    StreamOperation _streamStatusOperation;
+    QPointer<QGCVideoStreamInfo> _streamStatusTarget;
+    int _streamStatusTargetId = -1;
     bool    _handleLocalization             (QByteArray& bytes);
     bool    _replaceLocaleStrings           (const QDomNode node, QByteArray& bytes);
     bool    _loadCameraDefinitionFile       (QByteArray& bytes);
@@ -379,9 +435,9 @@ private:
     QString         _getParamName           (const char* param_id);
 
 protected:
-    Vehicle*                            _vehicle            = nullptr;
+    QPointer<Vehicle>                   _vehicle;
     int                                 _compID             = 0;
-    mavlink_camera_information_t        _info;
+    mavlink_camera_information_t        _info{};
     int                                 _version            = 0;
     bool                                _cached             = false;
     bool                                _paramComplete      = false;

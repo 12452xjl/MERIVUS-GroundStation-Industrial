@@ -6,6 +6,7 @@
             "label":  "Image Start Capture",
             "mavCmd": 2000,
             "compId": 1,
+            "safetyClass": "inflight_safe",
             "param1": 0,
             "param2": 0,
             "param3": 0,
@@ -16,7 +17,8 @@
         },
         {
             "label":  "Image Stop Capture",
-            "mavCmd": 2001
+            "mavCmd": 2001,
+            "safetyClass": "inflight_safe"
         }
     ]
 }

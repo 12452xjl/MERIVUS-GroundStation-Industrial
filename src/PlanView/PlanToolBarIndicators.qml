@@ -247,7 +247,15 @@ Item {
             enabled:     !_controllerSyncInProgress
             visible:     !_controllerOffline && !_controllerSyncInProgress && !uploadCompleteText.visible
             primary:     _controllerDirty
-            onClicked:   _planMasterController.upload()
+            onClicked: {
+                if (globals.planMasterControllerPlanView
+                        && typeof globals.planMasterControllerPlanView.upload === "function") {
+                    globals.planMasterControllerPlanView.upload()
+                } else {
+                    mainWindow.showMessageDialog(qsTr("任务上传已阻止"),
+                                                 qsTr("任务编辑器尚未准备好安全上传入口。"))
+                }
+            }
 
             PropertyAnimation on opacity {
                 easing.type:    Easing.OutQuart
@@ -324,4 +332,3 @@ Item {
         }
     }
 }
-

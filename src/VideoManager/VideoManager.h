@@ -15,6 +15,8 @@
 #include <QTimer>
 #include <QTime>
 #include <QUrl>
+#include <QPointer>
+#include <memory>
 
 #include "QGCMAVLink.h"
 #include "QGCLoggingCategory.h"
@@ -27,6 +29,11 @@ Q_DECLARE_LOGGING_CATEGORY(VideoManagerLog)
 class VideoSettings;
 class Vehicle;
 class Joystick;
+class QGCCorePlugin;
+class QGCCameraManager;
+class QGCVideoStreamInfo;
+class VehicleLinkManager;
+class MultiVehicleManager;
 
 class VideoManager : public QGCTool
 {
@@ -153,12 +160,22 @@ protected:
     void _startReceiver             (unsigned id);
     void _stopReceiver              (unsigned id);
 
+    struct StreamSelection;
+    StreamSelection _captureStream(bool thermal);
+    bool _selectionCurrent(const StreamSelection& selection) const;
+    bool _advancePlaybackEpoch();
+    void _configureReceiver(unsigned id);
+    void _receiverStarted(unsigned id, VideoReceiver::STATUS status);
+    void _receiverStopped(unsigned id, VideoReceiver::STATUS status);
+    void _retryReceiver(unsigned id);
+    void _scheduleRestart(unsigned id);
+
 protected:
     QString                 _videoFile;
     QString                 _imageFile;
     SubtitleWriter          _subtitleWriter;
     bool                    _isTaisync              = false;
-    VideoReceiver*          _videoReceiver[2]       = { nullptr, nullptr };
+    QPointer<VideoReceiver>  _videoReceiver[2];
     void*                   _videoSink[2]           = { nullptr, nullptr };
     QString                 _videoUri[2];
     // FIXME: AV: _videoStarted seems to be access from 3 different threads, from time to time
@@ -172,10 +189,32 @@ protected:
     QAtomicInteger<bool>    _decoding               = false;
     QAtomicInteger<bool>    _recording              = false;
     QAtomicInteger<quint32> _videoSize              = 0;
-    VideoSettings*          _videoSettings          = nullptr;
+    QPointer<VideoSettings>  _videoSettings;
     QString                 _uvcVideoSourceID;
     bool                    _fullScreen             = false;
-    Vehicle*                _activeVehicle          = nullptr;
+    QPointer<Vehicle>        _activeVehicle;
+    QPointer<QGCCameraManager> _activeCameraManager;
+    QPointer<VehicleLinkManager> _activeLinkManager;
+    QPointer<MultiVehicleManager> _vehicleManager;
+    QPointer<QGCToolbox>      _videoToolbox;
+    QPointer<QGCCorePlugin>  _videoPlugin;
+    QList<QMetaObject::Connection> _vehicleConnections;
+    quint64                 _bindingEpoch = 0, _playbackEpoch = 0, _mediaActionEpoch = 0;
+    QAtomicInteger<bool>    _videoRequested = true;
+    bool                    _shuttingDown = false, _toolboxConfigured = false, _initializingVideo = false;
+    bool                    _bindingExhausted = false;
+    bool                    _startPending[2] = { false, false }, _stopPending[2] = { false, false };
+    bool                    _stopAfterStart[2] = { false, false }, _settingsUpdating[2] = { false, false };
+    bool                    _retryAfterStop[2] = { false, false };
+    bool                    _restartScheduled[2] = { false, false }, _settingsResolved[2] = { false, false };
+    bool                    _restartDeferred[2] = { false, false };
+    QString                 _startUri[2];
+    bool                    _startLowLatency[2] = { false, false };
+    quint64                 _startBinding[2] = { 0, 0 }, _startIntent[2] = { 0, 0 };
+    unsigned                _receiverRetries[2] = { 0, 0 };
+    QTimer                  _receiverRetry[2];
+    std::shared_ptr<StreamSelection> _resolvedSelection[2];
+    std::shared_ptr<StreamSelection> _startSelection[2];
 };
 
 #endif

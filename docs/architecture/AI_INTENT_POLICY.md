@@ -8,8 +8,9 @@
 - `ActionProposal` 是 QGC 内部显示用的动作建议模型。
 - `AiSchemaValidator` 只判断 Agent 返回结构是否安全、大小是否受控。
 - `AiCommandPolicy` 只做本地风险和策略决策，不调用 Vehicle、Mission、MAVLink、Swarm 或 PX4。
+- `FleetAutonomyPolicy` 只声明 AI 建议所处的人工/辅助/监督/自动化阶段，以及适配器能力、权限、签名和沙箱占位；它不替代 `AiCommandPolicy`，也不把 proposal 变成执行授权。
 - `AiAuditEvent` 只记录脱敏审计摘要，不记录 Token、API Key、完整用户消息、RTSP 凭据或服务端账号。
-- QML 只渲染建议卡片，不提供执行按钮。
+- QML 只渲染建议卡片，不提供执行按钮；当操作员显式点击“生成舰队审阅草稿”时，允许把已校验 proposal 送入 Fleet OS 的只读 `prepareFleetIntent()` 审阅计算，但不请求审批、不上传任务，也不释放飞行命令。
 
 ## ActionProposal 字段
 
@@ -111,7 +112,11 @@ UI-only：
 
 AI 面板收到本地判定后的 proposal 后，只显示：动作、参数摘要、来源、provider/model、schema 状态、本地风险、策略决策、是否需要确认、当前状态、原因和 request_id。
 
-当前没有执行按钮，也不会调用：
+对于 `vehicle.*` 或 `mission.*` 且未被本地策略拒绝的 proposal，AI 面板可以在操作员明确点击后生成一份 Fleet OS 审阅草稿；本地规则模式的起飞/降落/返航/暂停待确认建议也提供同样的显式“生成审阅”入口。该入口只携带安全的目标/位置/高度/时长字段，使用现有健康、能力、能量、空域和风险快照；它不会调用 `requestFleetIntentApproval()`、`approveFleetIntent()`，也不会连接 Vehicle、MAVLink、MissionManager 或 PX4。
+
+FleetIntentTask 的申请/批准 API 还必须绑定同一轮 `taskId/planId` 的协调器结果，并要求 `reviewStatus=reviewable` 且 `needsReview=false`；否则仅记录 `intent.approval_blocked`，避免“界面显示待复核但意图已批准”的状态错觉。控制器同时监听协调器的 `reviewChanged`：外部重新审阅（即使 `planId` 未变化）会立即使审批凭据失效，必须重新经过 `prepareFleetIntent()`。
+
+当前没有飞行动作执行按钮，也不会调用：
 
 - `guidedModeTakeoff`
 - `guidedModeLand`
@@ -121,6 +126,11 @@ AI 面板收到本地判定后的 proposal 后，只显示：动作、参数摘�
 - `startMission`
 - `executeGoto`
 - `executeQueuedGoto`
+
+AI proposal 若需要映射到 Fleet OS 阶段，默认按 `assisted` 读取
+`FleetAutonomyPolicy.evaluate()`，再由 `FleetRolePolicy` 和车辆安全门禁复核。
+监督/自动化阶段需要外部签名适配器和沙箱审批；当前 `unverified`/`*_pending`
+状态会保持审阅结果，不能释放命令。
 
 ## 审计
 

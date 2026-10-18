@@ -44,6 +44,7 @@ Item {
     readonly property string startMissionTitle:             qsTr("Start Mission")
     readonly property string mvStartMissionTitle:           qsTr("Start Mission (MV)")
     readonly property string continueMissionTitle:          qsTr("Continue Mission")
+    readonly property string resumeMissionTitle:            qsTr("Resume Mission")
     readonly property string resumeMissionUploadFailTitle:  qsTr("Resume FAILED")
     readonly property string pauseTitle:                    qsTr("Pause")
     readonly property string mvPauseTitle:                  qsTr("Pause (MV)")
@@ -67,6 +68,7 @@ Item {
     readonly property string gripperMessage:                       qsTr("Grab or Release the cargo")
     readonly property string startMissionMessage:               qsTr("Takeoff from ground and start the current mission.")
     readonly property string continueMissionMessage:            qsTr("Continue the mission from the current waypoint.")
+    readonly property string resumeMissionMessage:              qsTr("Resume the mission from the last flown waypoint.")
     readonly property string resumeMissionUploadFailMessage:    qsTr("Upload of resume mission failed. Confirm to retry upload")
     readonly property string landMessage:                       qsTr("Land the vehicle at the current position.")
     readonly property string rtlMessage:                        qsTr("Return to the launch position of the vehicle.")
@@ -215,6 +217,55 @@ Item {
         }
     }
 
+    // The stock controller is also used as the compatibility fallback when a
+    // custom plugin does not provide the MERIVUS controller.  Keep that path
+    // fail-closed as well: a stale confirmation must never turn into a direct
+    // Vehicle command after the link disappeared or before the initial
+    // handshake completed.
+    function _commandTransportFailure(vehicle) {
+        if (!vehicle) {
+            return qsTr("No vehicle is selected.")
+        }
+        if (!vehicle.initialConnectComplete) {
+            return qsTr("Vehicle link is not ready.")
+        }
+        if (!vehicle.vehicleLinkManager) {
+            return qsTr("Vehicle link manager is unavailable.")
+        }
+        if (vehicle.vehicleLinkManager.communicationLost) {
+            return qsTr("Vehicle communication is lost.")
+        }
+        return ""
+    }
+
+    function _guardCommandVehicle(vehicle, title) {
+        var failure = _commandTransportFailure(vehicle)
+        if (failure.length === 0) {
+            return true
+        }
+        console.warn("Guided command blocked:", title, failure)
+        if (mainWindow && typeof mainWindow.showMessageDialog === "function") {
+            mainWindow.showMessageDialog(qsTr("Command blocked"), failure)
+        }
+        return false
+    }
+
+    function _guardCommandFleet(vehicles, title) {
+        if (!vehicles || typeof vehicles.count !== "number"
+                || typeof vehicles.get !== "function") {
+            return _guardCommandVehicle(null, title)
+        }
+        // Preflight every target before the first command is sent.  This
+        // avoids a partially-started multi-vehicle action when one link has
+        // already gone stale.
+        for (var index = 0; index < vehicles.count; index++) {
+            if (!_guardCommandVehicle(vehicles.get(index), title)) {
+                return false
+            }
+        }
+        return vehicles.count > 0
+    }
+
     on_ActiveVehicleChanged: _outputState()
 
     Component.onCompleted:              _outputState()
@@ -309,6 +360,11 @@ Item {
     }
 
     property var _actionData
+    property int _confirmedSetWaypointItemCount: -1
+    property var _actionTargetVehicleIds: []
+    // Freeze the confirmed target so delayed callbacks cannot retarget a
+    // direct Vehicle command after the operator switches active vehicles.
+    property var _confirmedVehicle: null
 
     on_FlightModeChanged: {
         _vehiclePaused =        _activeVehicle ? _flightMode === _activeVehicle.pauseFlightMode : false
@@ -360,24 +416,105 @@ Item {
         confirmDialog.visible =     false
         actionList.visible =        false
         guidedValueSlider.visible =    false
+        _confirmedVehicle = null
+        _confirmedSetWaypointItemCount = -1
+        _actionTargetVehicleIds = []
     }
 
     // Called when an action is about to be executed in order to confirm
     function confirmAction(actionCode, actionData, mapIndicator) {
         var showImmediate = true
         closeAll()
+        var frozenActionData = actionData
+        if (actionCode === actionOrbit && mapIndicator
+                && typeof mapIndicator.radius === "function") {
+            var orbitRadius = Number(mapIndicator.radius())
+            var orbitCenter = actionData
+            if (!orbitCenter || typeof orbitCenter.isValid !== "function"
+                    || !orbitCenter.isValid() || !isFinite(orbitRadius)
+                    || orbitRadius <= 0 || orbitRadius > 100000) {
+                console.warn("Orbit confirmation blocked: invalid center or radius")
+                return
+            }
+            // Freeze all geometry used by the command. The map indicator is
+            // intentionally retained only for display; it remains mutable
+            // while the confirmation dialog is open.
+            var orbitLatitude = Number(orbitCenter.latitude)
+            var orbitLongitude = Number(orbitCenter.longitude)
+            var orbitAltitude = Number(orbitCenter.altitude)
+            if (!isFinite(orbitLatitude) || orbitLatitude < -90 || orbitLatitude > 90
+                    || !isFinite(orbitLongitude) || orbitLongitude < -180 || orbitLongitude > 180
+                    || !isFinite(orbitAltitude)) {
+                console.warn("Orbit confirmation blocked: coordinate is not finite")
+                return
+            }
+            frozenActionData = {
+                latitude: orbitLatitude,
+                longitude: orbitLongitude,
+                altitude: orbitAltitude,
+                radius: orbitRadius,
+                clockwise: !!mapIndicator.clockwiseRotation,
+                vehicleId: _activeVehicle ? _activeVehicle.id : 0
+            }
+        }
+        if (actionCode === actionSetWaypoint) {
+            var confirmedWaypointIndex = Number(actionData)
+            var confirmedWaypointCount = Number(_missionItemCount)
+            if (!isFinite(confirmedWaypointIndex) || Math.floor(confirmedWaypointIndex) !== confirmedWaypointIndex
+                    || confirmedWaypointIndex < 0
+                    || (isFinite(confirmedWaypointCount) && confirmedWaypointCount > 0
+                        && confirmedWaypointIndex >= confirmedWaypointCount)) {
+                console.warn("Set waypoint confirmation blocked: invalid mission index")
+                return
+            }
+            _confirmedSetWaypointItemCount = confirmedWaypointCount
+        } else {
+            _confirmedSetWaypointItemCount = -1
+        }
+        if (actionCode === actionROI || actionCode === actionSetHome) {
+            var coordinateSnapshot = actionData
+            var coordinateLatitude = coordinateSnapshot ? Number(coordinateSnapshot.latitude) : NaN
+            var coordinateLongitude = coordinateSnapshot ? Number(coordinateSnapshot.longitude) : NaN
+            var coordinateAltitude = coordinateSnapshot ? Number(coordinateSnapshot.altitude) : NaN
+            if (!coordinateSnapshot || typeof coordinateSnapshot.isValid !== "function"
+                    || !coordinateSnapshot.isValid()
+                    || !isFinite(coordinateLatitude) || coordinateLatitude < -90 || coordinateLatitude > 90
+                    || !isFinite(coordinateLongitude) || coordinateLongitude < -180 || coordinateLongitude > 180
+                    || !isFinite(coordinateAltitude)) {
+                console.warn("Coordinate action confirmation blocked: invalid coordinate")
+                return
+            }
+            frozenActionData = { latitude: coordinateLatitude,
+                                 longitude: coordinateLongitude,
+                                 altitude: coordinateAltitude,
+                                 vehicleId: _activeVehicle ? _activeVehicle.id : 0 }
+        }
+        if (actionCode === actionMVPause) {
+            var frozenPauseIds = []
+            var pauseVehicles = QGroundControl.multiVehicleManager.vehicles
+            for (var pauseIndex = 0; pauseIndex < pauseVehicles.count; pauseIndex++) {
+                var pauseId = Number(pauseVehicles.get(pauseIndex).id)
+                if (isFinite(pauseId) && Math.floor(pauseId) === pauseId && pauseId > 0) {
+                    frozenPauseIds.push(pauseId)
+                }
+            }
+            _actionTargetVehicleIds = frozenPauseIds
+            frozenActionData = frozenPauseIds.slice(0)
+        }
         confirmDialog.action = actionCode
-        confirmDialog.actionData = actionData
+        confirmDialog.actionData = frozenActionData
         confirmDialog.hideTrigger = true
         confirmDialog.mapIndicator = mapIndicator
         confirmDialog.optionText = ""
-        _actionData = actionData
+        _actionData = frozenActionData
+        _confirmedVehicle = _activeVehicle
 
         setupSlider(actionCode)
 
         switch (actionCode) {
         case actionArm:
             if (_vehicleFlying || !_guidedActionsEnabled) {
+                _confirmedVehicle = null
                 return
             }
             confirmDialog.title = armTitle
@@ -391,6 +528,7 @@ Item {
             break;
         case actionDisarm:
             if (_vehicleFlying) {
+                _confirmedVehicle = null
                 return
             }
             confirmDialog.title = disarmTitle
@@ -426,8 +564,14 @@ Item {
             confirmDialog.hideTrigger = Qt.binding(function() { return !showContinueMission })
             break;
         case actionResumeMission:
-            // Resume Mission is handled in mission end dialog
-            return
+            // Resume Mission is requested by the mission-complete dialog, but
+            // still goes through the same confirmation and frozen-target path
+            // as every other direct vehicle action.
+            showImmediate = false
+            confirmDialog.title = resumeMissionTitle
+            confirmDialog.message = resumeMissionMessage
+            confirmDialog.hideTrigger = Qt.binding(function() { return !showResumeMission })
+            break
         case actionResumeMissionUploadFail:
             confirmDialog.title = resumeMissionUploadFailTitle
             confirmDialog.message = resumeMissionUploadFailMessage
@@ -501,6 +645,7 @@ Item {
             break;
         case actionActionList:
             actionList.show()
+            _confirmedVehicle = null
             return
         case actionChangeSpeed:
             confirmDialog.hideTrigger = true
@@ -521,6 +666,7 @@ Item {
             break
         default:
             console.warn("Unknown actionCode", actionCode)
+            _confirmedVehicle = null
             return
         }
         confirmDialog.show(showImmediate)
@@ -530,15 +676,50 @@ Item {
     function executeAction(actionCode, actionData, sliderOutputValue, optionChecked) {
         var i;
         var rgVehicle;
+        var targetVehicle = _activeVehicle;
+        var multiVehicleAction = actionCode === actionMVStartMission
+                || actionCode === actionMVPause;
+
+        // Re-check transport state at execution time.  The confirmation UI
+        // can remain open while a vehicle disconnects, so checks made when
+        // confirmAction() was opened are not sufficient.
+        if (actionCode === actionMVPause) {
+            if (!actionData || actionData !== _actionData || actionData.length === undefined || actionData.length === 0) {
+                _confirmedVehicle = null
+                return false
+            }
+            for (var pausePreflightIndex = 0; pausePreflightIndex < actionData.length; pausePreflightIndex++) {
+                var pausePreflight = QGroundControl.multiVehicleManager.getVehicleById(actionData[pausePreflightIndex])
+                if (!pausePreflight || !_guardCommandVehicle(pausePreflight, "multi-vehicle pause")
+                        || typeof pausePreflight.pauseVehicle !== "function") {
+                    _confirmedVehicle = null
+                    return false
+                }
+            }
+        } else if (multiVehicleAction) {
+            if (!_guardCommandFleet(QGroundControl.multiVehicleManager.vehicles,
+                                    "multi-vehicle guided action")) {
+                _confirmedVehicle = null
+                return false
+            }
+        } else {
+            targetVehicle = _confirmedVehicle;
+            if (!targetVehicle || targetVehicle !== _activeVehicle
+                    || !_guardCommandVehicle(targetVehicle, "guided action")) {
+                _confirmedVehicle = null
+                return false
+            }
+        }
+
         switch (actionCode) {
         case actionRTL:
-            _activeVehicle.guidedModeRTL(optionChecked)
+            targetVehicle.guidedModeRTL(optionChecked)
             break
         case actionLand:
-            _activeVehicle.guidedModeLand()
+            targetVehicle.guidedModeLand()
             break
         case actionTakeoff:
-            _activeVehicle.guidedModeTakeoff(sliderOutputValue)
+            targetVehicle.guidedModeTakeoff(sliderOutputValue)
             break
         case actionResumeMission:
         case actionResumeMissionUploadFail:
@@ -546,79 +727,139 @@ Item {
             break
         case actionStartMission:
         case actionContinueMission:
-            _activeVehicle.startMission()
+            targetVehicle.startMission()
             break
         case actionMVStartMission:
             rgVehicle = QGroundControl.multiVehicleManager.vehicles
+            if (!_guardCommandFleet(rgVehicle, "multi-vehicle start mission")) {
+                _confirmedVehicle = null
+                return false
+            }
             for (i = 0; i < rgVehicle.count; i++) {
                 rgVehicle.get(i).startMission()
             }
             break
         case actionArm:
-            _activeVehicle.armed = true
+            targetVehicle.armed = true
             break
         case actionForceArm:
-            _activeVehicle.forceArm()
+            targetVehicle.forceArm()
             break
         case actionDisarm:
-            _activeVehicle.armed = false
+            targetVehicle.armed = false
             break
         case actionEmergencyStop:
-            _activeVehicle.emergencyStop()
+            targetVehicle.emergencyStop()
             break
         case actionChangeAlt:
-            _activeVehicle.guidedModeChangeAltitude(sliderOutputValue, false /* pauseVehicle */)
+            targetVehicle.guidedModeChangeAltitude(sliderOutputValue, false /* pauseVehicle */)
             break
         case actionGoto:
-            _activeVehicle.guidedModeGotoLocation(actionData)
+            targetVehicle.guidedModeGotoLocation(actionData)
             break
         case actionSetWaypoint:
-            _activeVehicle.setCurrentMissionSequence(actionData)
+            var waypointIndex = Number(actionData)
+            var waypointCount = Number(_missionItemCount)
+            if (!isFinite(waypointIndex) || Math.floor(waypointIndex) !== waypointIndex
+                    || waypointIndex < 0
+                    || (isFinite(waypointCount) && waypointCount > 0 && waypointIndex >= waypointCount)
+                    || (_confirmedSetWaypointItemCount > 0 && waypointCount !== _confirmedSetWaypointItemCount)) {
+                console.warn("Set waypoint execution blocked: invalid mission index")
+                _confirmedVehicle = null
+                return false
+            }
+            targetVehicle.setCurrentMissionSequence(actionData)
             break
         case actionOrbit:
-            _activeVehicle.guidedModeOrbit(orbitMapCircle.center, orbitMapCircle.radius() * (orbitMapCircle.clockwiseRotation ? 1 : -1), _activeVehicle.altitudeAMSL.rawValue + sliderOutputValue)
+            if (!actionData || actionData !== _actionData
+                    || !isFinite(Number(actionData.radius))
+                    || Number(actionData.radius) <= 0
+                    || Number(actionData.radius) > 100000
+                    || !isFinite(Number(actionData.latitude)) || Number(actionData.latitude) < -90 || Number(actionData.latitude) > 90
+                    || !isFinite(Number(actionData.longitude)) || Number(actionData.longitude) < -180 || Number(actionData.longitude) > 180
+                    || !isFinite(Number(actionData.altitude))
+                    || Number(actionData.vehicleId) !== Number(targetVehicle.id)) {
+                console.warn("Orbit execution blocked: confirmation geometry or target identity changed")
+                _confirmedVehicle = null
+                return false
+            }
+            var orbitExecutionCoordinate = QtPositioning.coordinate(Number(actionData.latitude),
+                                                                    Number(actionData.longitude),
+                                                                    Number(actionData.altitude))
+            targetVehicle.guidedModeOrbit(orbitExecutionCoordinate,
+                                          Number(actionData.radius) * (actionData.clockwise ? 1 : -1),
+                                          targetVehicle.altitudeAMSL.rawValue + sliderOutputValue)
             break
         case actionLandAbort:
-            _activeVehicle.abortLanding(50)     // hardcoded value for climbOutAltitude that is currently ignored
+            targetVehicle.abortLanding(50)     // hardcoded value for climbOutAltitude that is currently ignored
             break
         case actionPause:
-            _activeVehicle.guidedModeChangeAltitude(sliderOutputValue, true /* pauseVehicle */)
+            targetVehicle.guidedModeChangeAltitude(sliderOutputValue, true /* pauseVehicle */)
             break
         case actionMVPause:
-            rgVehicle = QGroundControl.multiVehicleManager.vehicles
-            for (i = 0; i < rgVehicle.count; i++) {
-                rgVehicle.get(i).pauseVehicle()
+            for (i = 0; i < actionData.length; i++) {
+                var frozenPauseVehicle = QGroundControl.multiVehicleManager.getVehicleById(actionData[i])
+                if (!frozenPauseVehicle || !_guardCommandVehicle(frozenPauseVehicle, "multi-vehicle pause")
+                        || typeof frozenPauseVehicle.pauseVehicle !== "function") {
+                    _confirmedVehicle = null
+                    return false
+                }
+                frozenPauseVehicle.pauseVehicle()
             }
+            _actionTargetVehicleIds = []
             break
         case actionVtolTransitionToFwdFlight:
-            _activeVehicle.vtolInFwdFlight = true
+            targetVehicle.vtolInFwdFlight = true
             break
         case actionVtolTransitionToMRFlight:
-            _activeVehicle.vtolInFwdFlight = false
+            targetVehicle.vtolInFwdFlight = false
             break
         case actionROI:
-            _activeVehicle.guidedModeROI(actionData)
+            if (!actionData || actionData !== _actionData
+                    || !isFinite(Number(actionData.latitude)) || Number(actionData.latitude) < -90 || Number(actionData.latitude) > 90
+                    || !isFinite(Number(actionData.longitude)) || Number(actionData.longitude) < -180 || Number(actionData.longitude) > 180
+                    || !isFinite(Number(actionData.altitude))) {
+                console.warn("ROI execution blocked: invalid coordinate")
+                _confirmedVehicle = null
+                return false
+            }
+            targetVehicle.guidedModeROI(QtPositioning.coordinate(Number(actionData.latitude),
+                                                                 Number(actionData.longitude),
+                                                                 Number(actionData.altitude)))
             break
         case actionChangeSpeed:
-            if (_activeVehicle) {
+            if (targetVehicle) {
                 // We need to convert back to m/s as that is what mavlink standard uses for MAV_CMD_DO_CHANGE_SPEED
                 var metersSecondSpeed = QGroundControl.unitsConversion.appSettingsSpeedUnitsToMetersSecond(sliderOutputValue).toFixed(1)
-                if (_activeVehicle.vtolInFwdFlight || _activeVehicle.fixedWing) {
-                   _activeVehicle.guidedModeChangeEquivalentAirspeedMetersSecond(metersSecondSpeed)
+                if (targetVehicle.vtolInFwdFlight || targetVehicle.fixedWing) {
+                   targetVehicle.guidedModeChangeEquivalentAirspeedMetersSecond(metersSecondSpeed)
                 } else {
-                    _activeVehicle.guidedModeChangeGroundSpeedMetersSecond(metersSecondSpeed)
+                    targetVehicle.guidedModeChangeGroundSpeedMetersSecond(metersSecondSpeed)
                 }
             }
             break
         case actionGripper:           
-            _gripperFunction === undefined ? _activeVehicle.sendGripperAction(Vehicle.Invalid_option) : _activeVehicle.sendGripperAction(_gripperFunction)
+            _gripperFunction === undefined ? targetVehicle.sendGripperAction(Vehicle.Invalid_option) : targetVehicle.sendGripperAction(_gripperFunction)
             break
         case actionSetHome:
-            _activeVehicle.doSetHome(actionData)
+            if (!actionData || actionData !== _actionData
+                    || !isFinite(Number(actionData.latitude)) || Number(actionData.latitude) < -90 || Number(actionData.latitude) > 90
+                    || !isFinite(Number(actionData.longitude)) || Number(actionData.longitude) < -180 || Number(actionData.longitude) > 180
+                    || !isFinite(Number(actionData.altitude))) {
+                console.warn("Set home execution blocked: invalid coordinate")
+                _confirmedVehicle = null
+                return false
+            }
+            targetVehicle.doSetHome(QtPositioning.coordinate(Number(actionData.latitude),
+                                                             Number(actionData.longitude),
+                                                             Number(actionData.altitude)))
             break
         default:
             console.warn(qsTr("Internal error: unknown actionCode"), actionCode)
-            break
+            _confirmedVehicle = null
+            return false
         }
+        _confirmedVehicle = null
+        return true
     }
 }

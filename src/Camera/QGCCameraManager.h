@@ -17,11 +17,18 @@
 #include "QGCCameraControl.h"
 
 #include <QObject>
+#include <QElapsedTimer>
+#include <QList>
+#include <QPointer>
 #include <QTimer>
 
 Q_DECLARE_LOGGING_CATEGORY(CameraManagerLog)
 
 class Joystick;
+class JoystickManager;
+class MultiVehicleManager;
+class QGCToolbox;
+class FirmwarePlugin;
 
 //-----------------------------------------------------------------------------
 /// Camera Manager
@@ -50,6 +57,10 @@ public:
     virtual QGCVideoStreamInfo* currentStreamInstance();
     //-- Current thermal stream
     virtual QGCVideoStreamInfo* thermalStreamInstance();
+
+    // Native, callback-free local intent fence. Zero is permanently unavailable
+    // after exhaustion/destruction; this is not a source or control permission.
+    quint64 cameraSelectionEpoch() const { return _sourceCurrent() ? _cameraEpoch : 0; }
 
 signals:
     void    camerasChanged          ();
@@ -92,14 +103,19 @@ protected:
     public:
         CameraStruct(QObject* parent, uint8_t compID_);
         QElapsedTimer lastHeartbeat;
+        QElapsedTimer lastRequest;
         bool    infoReceived = false;
         bool    gaveUp       = false;
+        bool    retired      = false;
+        bool    factoryPending = false;
+        QPointer<QGCCameraControl> camera;
+        QGCCameraControl* cameraIdentity = nullptr; // comparison only; never dereferenced/re-pinned
         int     tryCount     = 0;
         uint8_t compID       = 0;
     };
 
-    Vehicle*            _vehicle            = nullptr;
-    Joystick*           _activeJoystick     = nullptr;
+    QPointer<Vehicle>    _vehicle;
+    QPointer<Joystick>   _activeJoystick;
     bool                _vehicleReadyState  = false;
     int                 _currentTask        = 0;
     QmlObjectListModel  _cameras;
@@ -108,5 +124,34 @@ protected:
     QElapsedTimer       _lastZoomChange;
     QElapsedTimer       _lastCameraChange;
     QTimer              _cameraTimer;
-    QMap<QString, CameraStruct*> _cameraInfoRequest;
+    QMap<QString, QPointer<CameraStruct>> _cameraInfoRequest;
+
+private:
+    bool _sourceCurrent() const;
+    bool _contextCurrent(quint64 epoch) const;
+    bool _advanceCameraEpoch();
+    void _sourceChanged();
+    bool _joystickCurrent() const;
+    QPointer<QGCCameraControl> _knownCamera(QGCCameraControl* camera) const;
+    QPointer<QGCCameraControl> _inputCamera(quint64 epoch);
+    QGCVideoStreamInfo* _streamInstance(bool thermal);
+    void _cameraDestroyed(const QString& key, const QPointer<CameraStruct>& request, QGCCameraControl* identity);
+    void _scheduleDeadCameras();
+    void _retireCameras(bool deadOnly);
+
+    QPointer<QGCToolbox> _toolbox;
+    QPointer<MultiVehicleManager> _multiVehicleManager;
+    QPointer<JoystickManager> _joystickManager;
+    QPointer<FirmwarePlugin> _firmwarePlugin;
+    QList<QPointer<QGCCameraControl>> _cameraControls;
+    QList<QGCCameraControl*> _cameraIdentities; // parallel opaque identities, including tombstones
+    QList<QMetaObject::Connection> _joystickConnections;
+    int _vehicleId = 0;
+    int _firmwareType = 0;
+    int _vehicleType = 0;
+    quint64 _cameraEpoch = 1;
+    bool _epochExhausted = false;
+    bool _destroying = false;
+    bool _structuralBusy = false;
+    bool _deadRetirementQueued = false;
 };

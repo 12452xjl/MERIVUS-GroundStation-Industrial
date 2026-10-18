@@ -13,11 +13,39 @@
 #include "QGCCameraManager.h"
 #include "FTPManager.h"
 #include "QGCLZMA.h"
+#include "Vehicle.h"
+#include "VehicleLinkManager.h"
+#include "MAVLinkProtocol.h"
+#include "QGCToolbox.h"
 
 #include <QDir>
 #include <QStandardPaths>
 #include <QDomDocument>
 #include <QDomNodeList>
+#include <QScopeGuard>
+#include <QThread>
+#include <cstring>
+#include <limits>
+
+namespace {
+QString boundedCameraText(const char* bytes, int capacity)
+{
+    int length = 0;
+    while (length < capacity && bytes[length] != '\0') ++length;
+    return QString::fromUtf8(bytes, length);
+}
+
+bool sameStreamInformation(const mavlink_video_stream_information_t& left, const mavlink_video_stream_information_t& right)
+{
+    // Compare fields, not C-struct padding. Status samples have their own cache.
+    return left.stream_id == right.stream_id && left.count == right.count && left.type == right.type
+        && left.flags == right.flags && std::memcmp(&left.framerate, &right.framerate, sizeof(left.framerate)) == 0
+        && left.resolution_h == right.resolution_h && left.resolution_v == right.resolution_v
+        && left.bitrate == right.bitrate && left.rotation == right.rotation && left.hfov == right.hfov
+        && std::memcmp(left.name, right.name, sizeof(left.name)) == 0
+        && std::memcmp(left.uri, right.uri, sizeof(left.uri)) == 0;
+}
+}
 
 QGC_LOGGING_CATEGORY(CameraControlLog, "CameraControlLog")
 QGC_LOGGING_CATEGORY(CameraControlVerboseLog, "CameraControlVerboseLog")
@@ -160,23 +188,84 @@ QGCCameraControl::QGCCameraControl(const mavlink_camera_information_t *info, Veh
     , _vehicle(vehicle)
     , _compID(compID)
 {
+    QPointer<QGCCameraControl> self(this);
     QQmlEngine::setObjectOwnership(this, QQmlEngine::CppOwnership);
-    memcpy(&_info, info, sizeof(mavlink_camera_information_t));
+    if (!self) return;
+    QQmlEngine::setObjectOwnership(&_streamTombstone, QQmlEngine::CppOwnership);
+    if (!self) return;
+    if (info) memcpy(&_info, info, sizeof(mavlink_camera_information_t));
+    _streamManager = qobject_cast<QGCCameraManager*>(parent);
+    _streamManagerRequired = !_streamManager.isNull();
+    if (_vehicle) {
+        // Match the actual live child before pinning the legacy raw provider slot.
+        const auto children = _vehicle->children();
+        for (QObject* child : children) {
+            if (child == _vehicle->vehicleLinkManager()) {
+                _streamLinks = qobject_cast<VehicleLinkManager*>(child);
+                break;
+            }
+        }
+    }
+    _streamLinksRequired = _vehicle && _vehicle->vehicleLinkManager();
+    if (qgcApp()) _streamToolbox = qgcApp()->toolbox();
+    if (_streamToolbox) {
+        const auto tools = _streamToolbox->children();
+        for (QObject* tool : tools) {
+            if (tool == _streamToolbox->mavlinkProtocol()) _streamProtocol = qobject_cast<MAVLinkProtocol*>(tool);
+            if (tool == _streamToolbox->videoManager()) _streamVideoManager = qobject_cast<VideoManager*>(tool);
+        }
+    }
+    _streamProtocolRequired = _streamToolbox && _streamToolbox->mavlinkProtocol();
+    _advanceStreamEpoch();
+    const auto sourceChanged = [this]() { _invalidateStreamSource(); };
+    if (_vehicle) {
+        connect(_vehicle.data(), &QObject::destroyed, this, sourceChanged);
+        if (!self) return;
+        connect(_vehicle.data(), &Vehicle::cameraManagerChanged, this, sourceChanged);
+        if (!self) return;
+        connect(_vehicle.data(), &Vehicle::firmwareTypeChanged, this, sourceChanged);
+        if (!self) return;
+        connect(_vehicle.data(), &Vehicle::vehicleTypeChanged, this, sourceChanged);
+        if (!self) return;
+    }
+    if (_streamManager) {
+        connect(_streamManager.data(), &QObject::destroyed, this, sourceChanged);
+        if (!self) return;
+        // Manager intent is compared through its own non-wrapping epoch.
+        // Do not mutate our epoch during its normal currentCameraChanged
+        // notification: that would self-cancel the manager's stream tail.
+    }
+    if (_streamLinks) {
+        connect(_streamLinks.data(), &QObject::destroyed, this, sourceChanged);
+        if (!self) return;
+        connect(_streamLinks.data(), &VehicleLinkManager::primaryLinkChanged, this, sourceChanged);
+        if (!self) return;
+        connect(_streamLinks.data(), &VehicleLinkManager::communicationLostChanged, this, sourceChanged);
+        if (!self) return;
+        connect(_streamLinks.data(), &VehicleLinkManager::allLinksRemoved, this, sourceChanged);
+        if (!self) return;
+    }
+    if (_streamProtocol) {
+        connect(_streamProtocol.data(), &QObject::destroyed, this, sourceChanged);
+        if (!self) return;
+        connect(_streamProtocol.data(), &MAVLinkProtocol::systemIdChanged, this, sourceChanged);
+        if (!self) return;
+    }
+    connect(&_streams, &QmlObjectListModel::countChanged, this, [this]() { _advanceStreamEpoch(); });
+    connect(&_streamInfoTimer, &QTimer::timeout, this, &QGCCameraControl::_streamTimeout);
+    _streamInfoTimer.setSingleShot(false);
+    connect(&_streamStatusTimer, &QTimer::timeout, this, &QGCCameraControl::_streamStatusTimeout);
+    _streamStatusTimer.setSingleShot(true);
     connect(this, &QGCCameraControl::dataReady, this, &QGCCameraControl::_dataReady);
-    _vendor = QString(reinterpret_cast<const char*>(info->vendor_name));
-    _modelName = QString(reinterpret_cast<const char*>(info->model_name));
+    if (!self) return;
+    _vendor = boundedCameraText(reinterpret_cast<const char*>(_info.vendor_name), sizeof(_info.vendor_name));
+    _modelName = boundedCameraText(reinterpret_cast<const char*>(_info.model_name), sizeof(_info.model_name));
     int ver = static_cast<int>(_info.cam_definition_version);
     _cacheFile = QString::asprintf("%s/%s_%s_%03d.xml",
         qgcApp()->toolbox()->settingsManager()->appSettings()->parameterSavePath().toStdString().c_str(),
         _vendor.toStdString().c_str(),
         _modelName.toStdString().c_str(),
         ver);
-    if(info->cam_definition_uri[0] != 0) {
-        //-- Process camera definition file
-        _handleDefinitionFile(info->cam_definition_uri);
-    } else {
-        _initWhenReady();
-    }
     QSettings settings;
     _photoMode       = static_cast<PhotoMode>(settings.value(kPhotoMode, static_cast<int>(PHOTO_CAPTURE_SINGLE)).toInt());
     _photoLapse      = settings.value(kPhotoLapse, 1.0).toDouble();
@@ -186,41 +275,367 @@ QGCCameraControl::QGCCameraControl(const mavlink_camera_information_t *info, Veh
     _recTimer.setSingleShot(false);
     _recTimer.setInterval(333);
     connect(&_recTimer, &QTimer::timeout, this, &QGCCameraControl::_recTimerHandler);
+    if (!self) return;
+    // Initialization can synchronously notify/delete this controller. It is last.
+    const QString definition = boundedCameraText(_info.cam_definition_uri, sizeof(_info.cam_definition_uri));
+    if (!definition.isEmpty()) _handleDefinitionFile(definition);
+    else _initWhenReady();
 }
 
 //-----------------------------------------------------------------------------
 QGCCameraControl::~QGCCameraControl()
 {
-    delete _netManager;
+    _streamDestroying = true;
+    _streamInfoTimer.stop();
+    _streamStatusTimer.stop();
+    QNetworkAccessManager* manager = _netManager;
     _netManager = nullptr;
+    delete manager;
+}
+
+bool QGCCameraControl::_advanceStreamEpoch()
+{
+    if (_streamDestroying || _streamExhausted) return false;
+    if (_streamEpoch == std::numeric_limits<quint64>::max()) {
+        _streamExhausted = true;
+        _streamEpoch = 0;
+        _streamInfoTimer.stop();
+        _streamStatusTimer.stop();
+        return false;
+    }
+    ++_streamEpoch;
+    return true;
+}
+
+bool QGCCameraControl::_advanceStreamStatusEpoch()
+{
+    if (_streamDestroying || _streamExhausted) return false;
+    if (_streamStatusEpoch == std::numeric_limits<quint64>::max()) {
+        _streamExhausted = true;
+        _streamEpoch = 0;
+        _streamInfoTimer.stop();
+        _streamStatusTimer.stop();
+        return false;
+    }
+    ++_streamStatusEpoch;
+    return true;
+}
+
+bool QGCCameraControl::_advanceCameraModeEpoch()
+{
+    if (_streamDestroying || _cameraModeEpochExhausted) return false;
+    if (_cameraModeEpoch == std::numeric_limits<quint64>::max()) {
+        _cameraModeEpochExhausted = true;
+        _cameraModeEpoch = 0;
+        return false;
+    }
+    ++_cameraModeEpoch;
+    return true;
+}
+
+QPointer<Fact> QGCCameraControl::_ownedCameraModeFact() const
+{
+    // FactGroup's native map is a raw-address map. Do not getFact()/re-pin an
+    // address which may have been removed by an earlier notification.
+    Fact* const address = _nameToFactMap.value(QString::fromLatin1(kCAM_MODE), nullptr);
+    if (!address) return {};
+    const auto actualChildren = children();
+    for (QObject* actual : actualChildren)
+        if (actual == address) return qobject_cast<Fact*>(actual);
+    return {};
+}
+
+void QGCCameraControl::_requestCameraMode(CameraMode requestedMode)
+{
+    if (_resetting || !_advanceCameraModeEpoch()) return;
+    const quint64 modeEpoch = _cameraModeEpoch;
+    const QPointer<QGCCameraControl> self(this);
+    const bool parametersComplete = _paramComplete;
+    Fact* const nativeAddress = _nameToFactMap.value(QString::fromLatin1(kCAM_MODE), nullptr);
+    const auto parameter = _ownedCameraModeFact();
+    const auto operation = _streamOperation();
+    const auto current = [&]() {
+        const auto localCurrent = [&]() {
+            return self && !_resetting && !_cameraModeEpochExhausted && _cameraModeEpoch == modeEpoch
+                && _paramComplete == parametersComplete
+                && _nameToFactMap.value(QString::fromLatin1(kCAM_MODE), nullptr) == nativeAddress
+                && (!nativeAddress || (parameter && parameter->parent() == self.data()));
+        };
+        if (!localCurrent()) return false;
+        if (!_streamOperationCurrent(operation)) return false;
+        // Releasing the Link inside the source check is itself a boundary.
+        return localCurrent();
+    };
+    if (!current()) return;
+    const bool supported = hasModes();
+    if (!current() || !supported) return;
+    // A stale native map is not the basic-camera/no-parameter fallback.
+    if (nativeAddress && !parameter) return;
+    Fact* const returned = mode();
+    if (!current() || _paramComplete != parametersComplete
+        || _nameToFactMap.value(QString::fromLatin1(kCAM_MODE), nullptr) != nativeAddress
+        || (nativeAddress && !parameter)) return;
+    // Custom foreign/newly-created Fact returns have no pre-call lifetime pin.
+    if (returned && (!parameter || returned != parameter.data())) return;
+    const bool useParameter = returned != nullptr;
+    const auto previousMode = cameraMode();
+    if (!current() || _paramComplete != parametersComplete
+        || _nameToFactMap.value(QString::fromLatin1(kCAM_MODE), nullptr) != nativeAddress
+        || (nativeAddress && !parameter)) return;
+    if (previousMode == requestedMode) return; // the explicit intent still revoked an older caller
+    if (useParameter) {
+        if (!parameter || parameter->parent() != this) return;
+        parameter->setRawValue(requestedMode);
+        if (!current() || !parameter || parameter->parent() != this || _paramComplete != parametersComplete
+            || _nameToFactMap.value(QString::fromLatin1(kCAM_MODE), nullptr) != nativeAddress
+            || parameter->rawValue() != QVariant(static_cast<int>(requestedMode))) return;
+    } else {
+        operation.vehicle->sendMavCommand(operation.componentId, MAV_CMD_SET_CAMERA_MODE, true, 0, requestedMode);
+        if (!current() || _paramComplete != parametersComplete
+            || _nameToFactMap.value(QString::fromLatin1(kCAM_MODE), nullptr) != nativeAddress
+            || (nativeAddress && !parameter)) return;
+    }
+    _setCameraMode(requestedMode); // terminal virtual call; no old member continuation
+}
+
+void QGCCameraControl::_invalidateStreamSource()
+{
+    _advanceStreamEpoch();
+    _advanceStreamStatusEpoch();
+    _streamInfoTimer.stop();
+    _streamStatusTimer.stop();
+    _streamStatusTarget.clear();
+    _streamStatusTargetId = -1;
+}
+
+QGCCameraControl::StreamOperation QGCCameraControl::_streamOperation() const
+{
+    StreamOperation operation;
+    operation.vehicle = _vehicle;
+    operation.manager = _streamManager;
+    operation.links = _streamLinks;
+    operation.protocol = _streamProtocol;
+    operation.parent = parent();
+    operation.parentRequired = parent() != nullptr;
+    operation.epoch = _streamEpoch;
+    operation.managerEpoch = _streamManager ? _streamManager->cameraSelectionEpoch() : 0;
+    operation.selection = _currentStream;
+    operation.componentId = _compID;
+    operation.vehicleId = _vehicle ? _vehicle->id() : 0;
+    if (_streamLinks) {
+        operation.primaryOwner = _streamLinks->primaryLink();
+        const auto primary = operation.primaryOwner.lock();
+        operation.primary = primary.get();
+        operation.hadPrimary = bool(primary);
+    }
+    return operation;
+}
+
+bool QGCCameraControl::_streamOperationCurrent(const StreamOperation& operation) const
+{
+    QPointer<const QGCCameraControl> self(this);
+    const auto memoryCurrent = [&]() {
+        if (!self || _streamDestroying || _streamExhausted || QThread::currentThread() != thread()
+            || !operation.epoch || operation.epoch != _streamEpoch
+            || operation.selection != _currentStream || operation.componentId != _compID
+            || !operation.vehicle || operation.vehicle != _vehicle || operation.vehicle->id() != operation.vehicleId
+            || operation.parent != parent() || (operation.parentRequired && !operation.parent)
+            || operation.manager != _streamManager
+            || (_streamManagerRequired && (!operation.manager || operation.manager.data() != parent()))
+            || (operation.manager && (!operation.managerEpoch || operation.manager->cameraSelectionEpoch() != operation.managerEpoch))
+            || operation.links != _streamLinks || (_streamLinksRequired && !operation.links)
+            || operation.protocol != _streamProtocol || (_streamProtocolRequired && !operation.protocol)
+            || (operation.hadPrimary && !operation.primary)) return false;
+        if (operation.links) {
+            if (operation.vehicle->vehicleLinkManager() != operation.links.data()) return false;
+            const auto owner = operation.links->primaryLink();
+            if (owner.owner_before(operation.primaryOwner) || operation.primaryOwner.owner_before(owner)) return false;
+        }
+        return true;
+    };
+    if (!memoryCurrent()) return false;
+    if (operation.links) {
+        if (operation.vehicle->vehicleLinkManager() != operation.links.data()) return false;
+        const auto currentOwner = operation.links->primaryLink();
+        if (currentOwner.owner_before(operation.primaryOwner) || operation.primaryOwner.owner_before(currentOwner)) return false;
+        auto current = currentOwner.lock();
+        const bool matches = current.get() == operation.primary.data();
+        current.reset();
+        // Releasing the last strong Link reference may synchronously change
+        // source/intent or destroy providers. This tail is memory-only: no
+        // recursive lock or virtual source probe can start another cycle.
+        if (!self || !matches || !memoryCurrent()) return false;
+    }
+    return true;
+}
+
+QPointer<QGCVideoStreamInfo> QGCCameraControl::_ownedStream(QObject* candidate) const
+{
+    if (!candidate) return {};
+    const auto children = this->children();
+    for (QObject* child : children) {
+        if (child == candidate) return qobject_cast<QGCVideoStreamInfo*>(child);
+    }
+    return {};
+}
+
+QPointer<QGCVideoStreamInfo> QGCCameraControl::_streamAtSelection(int selection)
+{
+    if (selection < 0) return {};
+    int ordinal = 0;
+    for (int index = 0; index < _streams.count(); ++index) {
+        const auto stream = _ownedStream(_streams[index]);
+        if (stream && !stream->isThermal()) {
+            if (ordinal == selection) return stream;
+            ++ordinal;
+        }
+    }
+    return {};
+}
+
+int QGCCameraControl::_streamSelectionIndex(const QPointer<QGCVideoStreamInfo>& selected)
+{
+    if (!selected) return -1;
+    int ordinal = 0;
+    for (int index = 0; index < _streams.count(); ++index) {
+        const auto stream = _ownedStream(_streams[index]);
+        if (stream && !stream->isThermal()) {
+            if (stream == selected) return ordinal;
+            ++ordinal;
+        }
+    }
+    return -1;
+}
+
+void QGCCameraControl::_streamDestroyed(QObject* original)
+{
+    if (_streamDestroying || !original) return;
+    // Do not dereference or reconstruct a QObject pin from the dying address.
+    // A live, owner-local tombstone makes even TextRole safe immediately. The
+    // structural removal is deferred until the enclosing model insert ends.
+    auto* const rows = _streams.objectList();
+    bool replaced = false;
+    for (int index = 0; index < rows->size(); ++index) {
+        if (rows->at(index) == original) { (*rows)[index] = &_streamTombstone; replaced = true; }
+    }
+    _invalidateStreamSource();
+    if (replaced) {
+        const int previousSelection = _currentStream;
+        const int survivingSelection = _streamSelectionIndex(_selectedStreamIdentity);
+        _currentStream = survivingSelection >= 0 ? survivingSelection : 0;
+        _streamSelectionRetired = _streamSelectionRetired || survivingSelection < 0 || _currentStream != previousSelection;
+        _selectedStreamIdentity = _streamAtSelection(_currentStream);
+        _streamRowsRetired = true;
+        _queueRetiredStreamCleanup();
+    }
+}
+
+void QGCCameraControl::_queueRetiredStreamCleanup()
+{
+    if (_streamDestroying || !_streamRowsRetired || _streamStructuralBusy || _streamCleanupQueued) return;
+    _streamCleanupQueued = true;
+    const QPointer<QGCCameraControl> self(this);
+    QTimer::singleShot(0, this, [self]() { if (self) self->_cleanupRetiredStreams(); });
+}
+
+void QGCCameraControl::_cleanupRetiredStreams()
+{
+    _streamCleanupQueued = false;
+    if (_streamDestroying || !_streamRowsRetired || _streamStructuralBusy) return;
+    const QPointer<QGCCameraControl> self(this);
+    auto operation = _streamOperation();
+    if (!self) return;
+    _streamStructuralBusy = true;
+    const auto release = qScopeGuard([self]() {
+        if (self) { self->_streamStructuralBusy = false; self->_queueRetiredStreamCleanup(); }
+    });
+    _streamRowsRetired = false;
+    const auto selected = _selectedStreamIdentity;
+    const bool retiredSelection = _streamSelectionRetired;
+    _streamSelectionRetired = false;
+    QStringList labels;
+    for (int index = 0; index < _streams.count(); ++index) {
+        const auto stream = _ownedStream(_streams[index]);
+        if (stream && !stream->isThermal()) labels.append(stream->name());
+    }
+    const bool labelsChanged = labels != _streamLabels;
+    const int previousSelection = _currentStream;
+    _streamLabels = labels;
+    _currentStream = _streamSelectionIndex(selected);
+    if (_currentStream < 0) _currentStream = 0;
+    _selectedStreamIdentity = _streamAtSelection(_currentStream);
+    operation.selection = _currentStream;
+    quint64 expectedEpoch = _streamEpoch;
+    bool originalIntent = !_streamExhausted;
+    const int maximumRemovals = _streams.count();
+    for (int remaining = maximumRemovals; remaining > 0; --remaining) {
+        const int index = _streams.indexOf(&_streamTombstone);
+        if (index < 0) break;
+        _streams.removeAt(index);
+        if (!self) return;
+        if (expectedEpoch == std::numeric_limits<quint64>::max()) originalIntent = false;
+        else ++expectedEpoch; // exactly the countChanged owned by this removal
+        if (_streamExhausted || _streamEpoch != expectedEpoch) originalIntent = false;
+    }
+    if (!originalIntent || _streamEpoch != expectedEpoch) return;
+    operation.epoch = expectedEpoch;
+    if (!_streamOperationCurrent(operation)) return;
+    emit streamsChanged();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    if (labelsChanged) {
+        emit streamLabelsChanged();
+        if (!self || !_streamOperationCurrent(operation)) return;
+    }
+    if (retiredSelection || _currentStream != previousSelection) {
+        emit currentStreamChanged();
+        if (!self || !_streamOperationCurrent(operation)) return;
+    }
+    emit thermalStreamChanged();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    emit autoStreamChanged();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    const auto manager = operation.manager;
+    if (manager) emit manager->streamChanged();
 }
 
 //-----------------------------------------------------------------------------
 void
 QGCCameraControl::_initWhenReady()
 {
+    QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation)) return;
     qCDebug(CameraControlLog) << "_initWhenReady()";
-    if(isBasic()) {
+    const bool basic = isBasic();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    // Install common observers before a request/readiness signal can reenter.
+    connect(operation.vehicle.data(), &Vehicle::mavCommandResult, this, &QGCCameraControl::_mavCommandResult, Qt::UniqueConnection);
+    if (!self || !_streamOperationCurrent(operation)) return;
+    connect(&_captureStatusTimer, &QTimer::timeout, this, &QGCCameraControl::_requestCaptureStatus, Qt::UniqueConnection);
+    if (!self || !_streamOperationCurrent(operation)) return;
+    _captureStatusTimer.setSingleShot(true);
+    QTimer::singleShot(2500, this, &QGCCameraControl::_requestStorageInfo);
+    _captureStatusTimer.start(2750);
+    if(basic) {
         qCDebug(CameraControlLog) << "Basic, MAVLink only messages.";
         _requestCameraSettings();
+        if (!self || !_streamOperationCurrent(operation)) return;
         QTimer::singleShot(250, this, &QGCCameraControl::_checkForVideoStreams);
         //-- Basic cameras have no parameters
         _paramComplete = true;
         emit parametersReady();
+        if (!self || !_streamOperationCurrent(operation)) return;
     } else {
         _requestAllParameters();
+        if (!self || !_streamOperationCurrent(operation)) return;
         //-- Give some time to load the parameters before going after the camera settings
         QTimer::singleShot(2000, this, &QGCCameraControl::_requestCameraSettings);
     }
-    connect(_vehicle, &Vehicle::mavCommandResult, this, &QGCCameraControl::_mavCommandResult);
-    connect(&_captureStatusTimer, &QTimer::timeout, this, &QGCCameraControl::_requestCaptureStatus);
-    _captureStatusTimer.setSingleShot(true);
-    QTimer::singleShot(2500, this, &QGCCameraControl::_requestStorageInfo);
-    _captureStatusTimer.start(2750);
     emit infoChanged();
-
-    delete _netManager;
+    if (!self || !_streamOperationCurrent(operation)) return;
+    QNetworkAccessManager* manager = _netManager;
     _netManager = nullptr;
+    delete manager;
 }
 
 //-----------------------------------------------------------------------------
@@ -324,9 +739,26 @@ void
 QGCCameraControl::_setCameraMode(CameraMode mode)
 {
     if(_cameraMode != mode) {
+        if (!_advanceCameraModeEpoch()) return;
+        const quint64 modeEpoch = _cameraModeEpoch;
+        QPointer<QGCCameraControl> self(this);
+        const auto operation = _streamOperation();
+        if (!self || !_streamOperationCurrent(operation) || _cameraModeEpochExhausted || modeEpoch != _cameraModeEpoch) return;
+        if (!_advanceStreamStatusEpoch()) return;
+        const quint64 statusEpoch = _streamStatusEpoch;
         _cameraMode = mode;
         emit cameraModeChanged();
+        if (!self || !_streamOperationCurrent(operation) || _cameraModeEpochExhausted || modeEpoch != _cameraModeEpoch
+            || _cameraMode != mode || statusEpoch != _streamStatusEpoch) return;
         //-- Update stream status
+        const auto raw = currentStreamInstance();
+        if (!self || !_streamOperationCurrent(operation) || _cameraModeEpochExhausted || modeEpoch != _cameraModeEpoch
+            || _cameraMode != mode || statusEpoch != _streamStatusEpoch) return;
+        const auto stream = _ownedStream(raw);
+        if (!stream) return;
+        _streamStatusOperation = operation;
+        _streamStatusTarget = stream;
+        _streamStatusTargetId = stream->streamID();
         _streamStatusTimer.start(1000);
     }
 }
@@ -335,13 +767,15 @@ QGCCameraControl::_setCameraMode(CameraMode mode)
 void
 QGCCameraControl::toggleMode()
 {
-    if(!_resetting) {
-        if(cameraMode() == CAM_MODE_PHOTO || cameraMode() == CAM_MODE_SURVEY) {
-            setVideoMode();
-        } else if(cameraMode() == CAM_MODE_VIDEO) {
-            setPhotoMode();
-        }
-    }
+    if (_resetting || !_advanceCameraModeEpoch()) return;
+    const quint64 modeEpoch = _cameraModeEpoch;
+    const QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation) || _cameraModeEpoch != modeEpoch || _cameraModeEpochExhausted) return;
+    const auto mode = cameraMode();
+    if (!self || !_streamOperationCurrent(operation) || _cameraModeEpoch != modeEpoch || _cameraModeEpochExhausted || _resetting) return;
+    if (mode == CAM_MODE_PHOTO || mode == CAM_MODE_SURVEY) setVideoMode();
+    else if (mode == CAM_MODE_VIDEO) setPhotoMode();
 }
 
 //-----------------------------------------------------------------------------
@@ -362,35 +796,56 @@ QGCCameraControl::toggleVideo()
 bool
 QGCCameraControl::takePhoto()
 {
+    QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation)) return false;
     qCDebug(CameraControlLog) << "takePhoto()";
     //-- Check if camera can capture photos or if it can capture it while in Video Mode
-    if(!capturesPhotos()) {
+    const bool photos = capturesPhotos();
+    if (!self || !_streamOperationCurrent(operation)) return false;
+    if(!photos) {
         qCWarning(CameraControlLog) << "Camera does not handle image capture";
         return false;
     }
-    if(cameraMode() == CAM_MODE_VIDEO && !photosInVideoMode()) {
+    const auto mode = cameraMode();
+    if (!self || !_streamOperationCurrent(operation)) return false;
+    const bool videoPhotos = mode != CAM_MODE_VIDEO || photosInVideoMode();
+    if (!self || !_streamOperationCurrent(operation)) return false;
+    if(!videoPhotos) {
         qCWarning(CameraControlLog) << "Camera does not handle image capture while in video mode";
         return false;
     }
-    if(photoStatus() != PHOTO_CAPTURE_IDLE) {
+    const auto status = photoStatus();
+    if (!self || !_streamOperationCurrent(operation)) return false;
+    if(status != PHOTO_CAPTURE_IDLE) {
         qCWarning(CameraControlLog) << "Camera not idle";
         return false;
     }
     if(!_resetting) {
-        if(capturesPhotos()) {
-            _vehicle->sendMavCommand(
-                _compID,                                                                    // Target component
+        if(photos) {
+            const PhotoMode photoMode = _photoMode;
+            const qreal lapse = _photoLapse;
+            const int count = _photoLapseCount;
+            const auto toolbox = _streamToolbox;
+            const auto video = _streamVideoManager;
+            operation.vehicle->sendMavCommand(
+                operation.componentId,                                                     // Target component
                 MAV_CMD_IMAGE_START_CAPTURE,                                                // Command id
                 false,                                                                      // ShowError
                 0,                                                                          // Reserved (Set to 0)
-                static_cast<float>(_photoMode == PHOTO_CAPTURE_SINGLE ? 0 : _photoLapse),   // Duration between two consecutive pictures (in seconds--ignored if single image)
-                _photoMode == PHOTO_CAPTURE_SINGLE ? 1 : _photoLapseCount);                 // Number of images to capture total - 0 for unlimited capture
+                static_cast<float>(photoMode == PHOTO_CAPTURE_SINGLE ? 0 : lapse),
+                photoMode == PHOTO_CAPTURE_SINGLE ? 1 : count);
+            // Preserve the existing submitted result; do not continue old state
+            // writes or rediscover a provider after the command boundary.
+            if (!self || !_streamOperationCurrent(operation) || _photoMode != photoMode
+                || _photoLapse != lapse || _photoLapseCount != count) return true;
             _setPhotoStatus(PHOTO_CAPTURE_IN_PROGRESS);
+            if (!self || !_streamOperationCurrent(operation) || _photoMode != photoMode
+                || _photoLapse != lapse || _photoLapseCount != count) return true;
             _captureInfoRetries = 0;
             //-- Capture local image as well
-            if(qgcApp()->toolbox()->videoManager()) {
-                qgcApp()->toolbox()->videoManager()->grabImage();
-            }
+            if (toolbox && video && toolbox == _streamToolbox && video == _streamVideoManager
+                && toolbox->videoManager() == video.data()) video->grabImage();
             return true;
         }
     }
@@ -401,18 +856,27 @@ QGCCameraControl::takePhoto()
 bool
 QGCCameraControl::stopTakePhoto()
 {
+    QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation)) return false;
     if(!_resetting) {
         qCDebug(CameraControlLog) << "stopTakePhoto()";
-        if(photoStatus() == PHOTO_CAPTURE_IDLE || (photoStatus() != PHOTO_CAPTURE_INTERVAL_IDLE && photoStatus() != PHOTO_CAPTURE_INTERVAL_IN_PROGRESS)) {
+        const auto status = photoStatus();
+        if (!self || !_streamOperationCurrent(operation)) return false;
+        if(status == PHOTO_CAPTURE_IDLE || (status != PHOTO_CAPTURE_INTERVAL_IDLE && status != PHOTO_CAPTURE_INTERVAL_IN_PROGRESS)) {
             return false;
         }
-        if(capturesPhotos()) {
-            _vehicle->sendMavCommand(
-                _compID,                                                    // Target component
+        const bool photos = capturesPhotos();
+        if (!self || !_streamOperationCurrent(operation)) return false;
+        if(photos) {
+            operation.vehicle->sendMavCommand(
+                operation.componentId,                                     // Target component
                 MAV_CMD_IMAGE_STOP_CAPTURE,                                 // Command id
                 false,                                                      // ShowError
                 0);                                                         // Reserved (Set to 0)
+            if (!self || !_streamOperationCurrent(operation)) return true;
             _setPhotoStatus(PHOTO_CAPTURE_IDLE);
+            if (!self || !_streamOperationCurrent(operation)) return true;
             _captureInfoRetries = 0;
             return true;
         }
@@ -465,58 +929,14 @@ QGCCameraControl::stopVideo()
 void
 QGCCameraControl::setVideoMode()
 {
-    if(!_resetting && hasModes()) {
-        qCDebug(CameraControlLog) << "setVideoMode()";
-        //-- Does it have a mode parameter?
-        Fact* pMode = mode();
-        if(pMode) {
-            if(cameraMode() != CAM_MODE_VIDEO) {
-                pMode->setRawValue(CAM_MODE_VIDEO);
-                _setCameraMode(CAM_MODE_VIDEO);
-            }
-        } else {
-            //-- Use MAVLink Command
-            if(_cameraMode != CAM_MODE_VIDEO) {
-                //-- Use basic MAVLink message
-                _vehicle->sendMavCommand(
-                    _compID,                                // Target component
-                    MAV_CMD_SET_CAMERA_MODE,                // Command id
-                    true,                                   // ShowError
-                    0,                                      // Reserved (Set to 0)
-                    CAM_MODE_VIDEO);                        // Camera mode (0: photo, 1: video)
-                _setCameraMode(CAM_MODE_VIDEO);
-            }
-        }
-    }
+    _requestCameraMode(CAM_MODE_VIDEO);
 }
 
 //-----------------------------------------------------------------------------
 void
 QGCCameraControl::setPhotoMode()
 {
-    if(!_resetting && hasModes()) {
-        qCDebug(CameraControlLog) << "setPhotoMode()";
-        //-- Does it have a mode parameter?
-        Fact* pMode = mode();
-        if(pMode) {
-            if(cameraMode() != CAM_MODE_PHOTO) {
-                pMode->setRawValue(CAM_MODE_PHOTO);
-                _setCameraMode(CAM_MODE_PHOTO);
-            }
-        } else {
-            //-- Use MAVLink Command
-            if(_cameraMode != CAM_MODE_PHOTO) {
-                //-- Use basic MAVLink message
-                _vehicle->sendMavCommand(
-                    _compID,                                // Target component
-                    MAV_CMD_SET_CAMERA_MODE,                // Command id
-                    true,                                   // ShowError
-                    0,                                      // Reserved (Set to 0)
-                    CAM_MODE_PHOTO);                        // Camera mode (0: photo, 1: video)
-                _setCameraMode(CAM_MODE_PHOTO);
-            }
-        }
-    }
+    _requestCameraMode(CAM_MODE_PHOTO);
 }
 
 //-----------------------------------------------------------------------------
@@ -586,6 +1006,7 @@ void
 QGCCameraControl::resetSettings()
 {
     if(!_resetting) {
+        _advanceCameraModeEpoch(); // reset is a newer mode intent, even if the final mode value returns to the old value
         qCDebug(CameraControlLog) << "resetSettings()";
         _resetting = true;
         _vehicle->sendMavCommand(
@@ -1476,13 +1897,19 @@ QGCCameraControl::_requestStorageInfo()
 void
 QGCCameraControl::handleSettings(const mavlink_camera_settings_t& settings)
 {
-    qCDebug(CameraControlLog) << "handleSettings() Mode:" << settings.mode_id;
-    _setCameraMode(static_cast<CameraMode>(settings.mode_id));
-    qreal z = static_cast<qreal>(settings.zoomLevel);
-    qreal f = static_cast<qreal>(settings.focusLevel);
+    const mavlink_camera_settings_t snapshot = settings;
+    QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    qCDebug(CameraControlLog) << "handleSettings() Mode:" << snapshot.mode_id;
+    _setCameraMode(static_cast<CameraMode>(snapshot.mode_id));
+    if (!self || !_streamOperationCurrent(operation)) return;
+    qreal z = static_cast<qreal>(snapshot.zoomLevel);
+    qreal f = static_cast<qreal>(snapshot.focusLevel);
     if(std::isfinite(z) && z != _zoomLevel) {
         _zoomLevel = z;
         emit zoomLevelChanged();
+        if (!self || !_streamOperationCurrent(operation)) return;
     }
     if(std::isfinite(f) && f != _focusLevel) {
         _focusLevel = f;
@@ -1571,31 +1998,104 @@ QGCCameraControl::handleCaptureStatus(const mavlink_camera_capture_status_t& cap
 void
 QGCCameraControl::handleVideoInfo(const mavlink_video_stream_information_t* vi)
 {
-    qCDebug(CameraControlLog) << "handleVideoInfo:" << vi->stream_id << vi->uri;
-    _expectedCount = vi->count;
-    if(!_findStream(vi->stream_id, false)) {
-        qCDebug(CameraControlLog) << "Create stream handler for stream ID:" << vi->stream_id;
-        QGCVideoStreamInfo* pStream = new QGCVideoStreamInfo(this, vi);
-        QQmlEngine::setObjectOwnership(pStream, QQmlEngine::CppOwnership);
-        _streams.append(pStream);
-        //-- Thermal is handled separately and not listed
-        if(!pStream->isThermal()) {
-            _streamLabels.append(pStream->name());
+    if (!vi || _streamStructuralBusy || _streamDestroying || _streamExhausted) return;
+    const mavlink_video_stream_information_t information = *vi;
+    // Stream metadata is one-based. Zero in query commands means "all", and
+    // must never become a STOP/START target through a malformed catalog row.
+    if (!information.stream_id || !information.count || information.stream_id > information.count) return;
+    QPointer<QGCCameraControl> self(this);
+    auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    _streamStructuralBusy = true;
+    const auto cleanup = qScopeGuard([self]() {
+        if (self) { self->_streamStructuralBusy = false; self->_queueRetiredStreamCleanup(); }
+    });
+    const auto existing = _findStream(information.stream_id, false);
+    if (!self || !_streamOperationCurrent(operation)) return;
+    const auto ownedExisting = _ownedStream(existing);
+    if (ownedExisting && _expectedCount == information.count
+        && sameStreamInformation(ownedExisting->_lastInformation, information)) return;
+    if (!_advanceStreamEpoch()) return;
+    operation.epoch = _streamEpoch;
+    _expectedCount = information.count;
+    if (!ownedExisting) {
+        // Parent assignment and model insertion can both synchronously notify.
+        QPointer<QGCVideoStreamInfo> stream = new QGCVideoStreamInfo(nullptr, &information);
+        if (!self || !_streamOperationCurrent(operation)) { if (stream) delete stream.data(); return; }
+        QQmlEngine::setObjectOwnership(stream.data(), QQmlEngine::CppOwnership);
+        if (!self || !stream || !_streamOperationCurrent(operation)) { if (stream) delete stream.data(); return; }
+        stream->setParent(this);
+        if (!self || !stream || stream->parent() != self.data() || !_streamOperationCurrent(operation)) {
+            if (stream) delete stream.data();
+            return;
+        }
+        const bool thermal = stream->isThermal();
+        const QString label = stream->name();
+        QObject* const original = stream.data();
+        connect(stream.data(), &QObject::destroyed, this, [this, original]() { _streamDestroyed(original); });
+        if (!self || !stream || !_streamOperationCurrent(operation)) return;
+        // Keep native list/labels coherent before any model notification.
+        if (!thermal) _streamLabels.append(label);
+        const quint64 previousEpoch = operation.epoch;
+        _streams.append(stream.data());
+        if (!self || !stream || _streamExhausted
+            || previousEpoch == std::numeric_limits<quint64>::max()
+            || _streamEpoch != previousEpoch + 1) return;
+        operation.epoch = _streamEpoch; // exactly the one countChanged from this append
+        if (!_streamOperationCurrent(operation)) return;
+        _selectedStreamIdentity = _streamAtSelection(_currentStream);
+        if (!thermal) {
             emit streamsChanged();
+            if (!self || !_streamOperationCurrent(operation)) return;
             emit streamLabelsChanged();
+            if (!self || !_streamOperationCurrent(operation)) return;
         } else {
             emit thermalStreamChanged();
+            if (!self || !_streamOperationCurrent(operation)) return;
+        }
+    } else {
+        const bool wasThermal = ownedExisting->isThermal();
+        const bool thermal = bool(information.flags & VIDEO_STREAM_STATUS_FLAGS_THERMAL);
+        const auto selected = _selectedStreamIdentity ? _selectedStreamIdentity : _streamAtSelection(_currentStream);
+        // Stage complete native metadata/labels before notifying its consumers.
+        ownedExisting->_streamInfo = information;
+        ownedExisting->_lastInformation = information;
+        QStringList labels;
+        for (int index = 0; index < _streams.count(); ++index) {
+            const auto stream = _ownedStream(_streams[index]);
+            if (stream && !stream->isThermal()) labels.append(stream->name());
+        }
+        const bool labelsChanged = labels != _streamLabels;
+        _streamLabels = labels;
+        const int previousSelection = _currentStream;
+        _currentStream = _streamSelectionIndex(selected);
+        if (_currentStream < 0) _currentStream = 0;
+        _selectedStreamIdentity = _streamAtSelection(_currentStream);
+        operation.selection = _currentStream;
+        emit ownedExisting->infoChanged();
+        if (!self || !ownedExisting || !_streamOperationCurrent(operation)) return;
+        emit streamsChanged();
+        if (!self || !ownedExisting || !_streamOperationCurrent(operation)) return;
+        if (labelsChanged) {
+            emit streamLabelsChanged();
+            if (!self || !ownedExisting || !_streamOperationCurrent(operation)) return;
+        }
+        if (_currentStream != previousSelection || _selectedStreamIdentity != selected) {
+            emit currentStreamChanged();
+            if (!self || !ownedExisting || !_streamOperationCurrent(operation)) return;
+        }
+        if (wasThermal || thermal) {
+            emit thermalStreamChanged();
+            if (!self || !ownedExisting || !_streamOperationCurrent(operation)) return;
         }
     }
-    //-- Check for missing count
-    if(_streams.count() < _expectedCount) {
-        _streamInfoTimer.start(1000);
-    } else {
-        //-- Done
-        qCDebug(CameraControlLog) << "All stream handlers done";
+    if (_streams.count() < _expectedCount) _streamInfoTimer.start(1000);
+    else {
         _streamInfoTimer.stop();
         emit autoStreamChanged();
-        emit _vehicle->cameraManager()->streamChanged();
+        if (!self || !_streamOperationCurrent(operation)) return;
+        const auto manager = operation.manager;
+        if (manager) emit manager->streamChanged();
     }
 }
 
@@ -1603,108 +2103,128 @@ QGCCameraControl::handleVideoInfo(const mavlink_video_stream_information_t* vi)
 void
 QGCCameraControl::handleVideoStatus(const mavlink_video_stream_status_t* vs)
 {
-    _streamStatusTimer.stop();
-    qCDebug(CameraControlLog) << "handleVideoStatus:" << vs->stream_id;
-    QGCVideoStreamInfo* pInfo = _findStream(vs->stream_id);
-    if(pInfo) {
-        pInfo->update(vs);
+    if (!vs || _streamDestroying || _streamExhausted) return;
+    const mavlink_video_stream_status_t status = *vs;
+    QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    const quint64 statusEpoch = _streamStatusEpoch;
+    const auto found = _findStream(status.stream_id);
+    if (!self || !_streamOperationCurrent(operation) || statusEpoch != _streamStatusEpoch) return;
+    const auto stream = _ownedStream(found);
+    if (!stream) return;
+    if (_streamStatusTarget == stream && _streamStatusTargetId == status.stream_id
+        && _streamOperationCurrent(_streamStatusOperation)) {
+        _streamStatusTimer.stop();
+        _advanceStreamStatusEpoch(); // a synchronous response must not restart the old timer
     }
+    if (!self || !_streamOperationCurrent(operation)) return;
+    stream->update(&status); // update's only notification is last; no continuation through the stream
 }
 
 //-----------------------------------------------------------------------------
 void
 QGCCameraControl::setCurrentStream(int stream)
 {
-    if(stream != _currentStream && stream >= 0 && stream < _streamLabels.count()) {
-        if(_currentStream != stream) {
-            QGCVideoStreamInfo* pInfo = currentStreamInstance();
-            if(pInfo) {
-                qCDebug(CameraControlLog) << "Stopping stream:" << pInfo->uri();
-                //-- Stop current stream
-                _vehicle->sendMavCommand(
-                    _compID,                                // Target component
-                    MAV_CMD_VIDEO_STOP_STREAMING,           // Command id
-                    false,                                  // ShowError
-                    pInfo->streamID());                     // Stream ID
-            }
-            _currentStream = stream;
-            pInfo = currentStreamInstance();
-            if(pInfo) {
-                //-- Start new stream
-                qCDebug(CameraControlLog) << "Starting stream:" << pInfo->uri();
-                _vehicle->sendMavCommand(
-                    _compID,                                // Target component
-                    MAV_CMD_VIDEO_START_STREAMING,          // Command id
-                    false,                                  // ShowError
-                    pInfo->streamID());                     // Stream ID
-                //-- Update stream status
-                _requestStreamStatus(static_cast<uint8_t>(pInfo->streamID()));
-            }
-            emit currentStreamChanged();
-            emit _vehicle->cameraManager()->streamChanged();
-        }
+    // The dead-row bridge has not published its rebuilt labels yet. An old
+    // displayed index must not silently select a surviving successor object.
+    if (_streamRowsRetired || stream < 0 || stream >= _streamLabels.count() || !_advanceStreamEpoch()) return;
+    _streamStatusTimer.stop();
+    if (!_advanceStreamStatusEpoch()) return;
+    QPointer<QGCCameraControl> self(this);
+    auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    if (stream == operation.selection) {
+        _selectedStreamIdentity = _streamAtSelection(stream);
+        return; // still revokes an older in-flight intent
     }
+    const auto oldRaw = currentStreamInstance();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    const auto oldStream = _ownedStream(oldRaw);
+    const auto target = _streamAtSelection(stream);
+    if (!target) return;
+    const int targetId = target ? target->streamID() : -1;
+    if (target && targetId <= 0) return;
+    if (oldStream) {
+        const int oldId = oldStream->streamID();
+        if (oldId <= 0) return;
+        operation.vehicle->sendMavCommand(operation.componentId, MAV_CMD_VIDEO_STOP_STREAMING, false, oldId);
+        if (!self || !_streamOperationCurrent(operation) || !oldStream || (targetId >= 0 && !target)) return;
+    }
+    _currentStream = stream;
+    _selectedStreamIdentity = target;
+    operation.selection = stream;
+    if (target) {
+        operation.vehicle->sendMavCommand(operation.componentId, MAV_CMD_VIDEO_START_STREAMING, false, targetId);
+        if (!self || !target || !_streamOperationCurrent(operation)) return;
+        _requestStreamStatus(static_cast<uint8_t>(targetId));
+        if (!self || !target || !_streamOperationCurrent(operation)) return;
+    }
+    emit currentStreamChanged();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    const auto manager = operation.manager;
+    if (manager) emit manager->streamChanged();
 }
 
 //-----------------------------------------------------------------------------
 void
 QGCCameraControl::stopStream()
 {
-    QGCVideoStreamInfo* pInfo = currentStreamInstance();
-    if(pInfo) {
-        //-- Stop current stream
-        _vehicle->sendMavCommand(
-            _compID,                                // Target component
-            MAV_CMD_VIDEO_STOP_STREAMING,           // Command id
-            false,                                  // ShowError
-            pInfo->streamID());                     // Stream ID
-    }
+    if (!_advanceStreamEpoch() || !_advanceStreamStatusEpoch()) return;
+    _streamStatusTimer.stop();
+    QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    const auto raw = currentStreamInstance();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    const auto stream = _ownedStream(raw);
+    if (stream && stream->streamID() > 0) operation.vehicle->sendMavCommand(operation.componentId, MAV_CMD_VIDEO_STOP_STREAMING, false, stream->streamID());
 }
 
 //-----------------------------------------------------------------------------
 void
 QGCCameraControl::resumeStream()
 {
-    QGCVideoStreamInfo* pInfo = currentStreamInstance();
-    if(pInfo) {
-        //-- Start new stream
-        _vehicle->sendMavCommand(
-            _compID,                                // Target component
-            MAV_CMD_VIDEO_START_STREAMING,          // Command id
-            false,                                  // ShowError
-            pInfo->streamID());                     // Stream ID
-    }
+    if (!_advanceStreamEpoch() || !_advanceStreamStatusEpoch()) return;
+    _streamStatusTimer.stop();
+    QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    const auto raw = currentStreamInstance();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    const auto stream = _ownedStream(raw);
+    if (stream && stream->streamID() > 0) operation.vehicle->sendMavCommand(operation.componentId, MAV_CMD_VIDEO_START_STREAMING, false, stream->streamID());
 }
 
 //-----------------------------------------------------------------------------
 bool
 QGCCameraControl::autoStream()
 {
-    if(hasVideoStream()) {
-        return _streams.count() > 0;
-    }
-    return false;
+    QPointer<QGCCameraControl> self(this);
+    const auto epoch = _streamEpoch;
+    const bool available = hasVideoStream();
+    return self && !_streamDestroying && !_streamExhausted && epoch == _streamEpoch && available && _streams.count() > 0;
 }
 
 //-----------------------------------------------------------------------------
 QGCVideoStreamInfo*
 QGCCameraControl::currentStreamInstance()
 {
-    if(_currentStream < _streamLabels.count() && _streamLabels.count()) {
-        QGCVideoStreamInfo* pStream = _findStream(_streamLabels[_currentStream]);
-        return pStream;
-    }
-    return nullptr;
+    if (_streamDestroying || _streamExhausted) return nullptr;
+    const auto selected = _streamAtSelection(_currentStream);
+    _selectedStreamIdentity = selected;
+    return selected.data();
 }
 
 //-----------------------------------------------------------------------------
 QGCVideoStreamInfo*
 QGCCameraControl::thermalStreamInstance()
 {
+    if (_streamDestroying || _streamExhausted) return nullptr;
     //-- For now, it will return the first thermal listed (if any)
     for(int i = 0; i < _streams.count(); i++) {
         if(_streams[i]) {
-            QGCVideoStreamInfo* pStream = qobject_cast<QGCVideoStreamInfo*>(_streams[i]);
+            const auto pStream = _ownedStream(_streams[i]);
             if(pStream) {
                 if(pStream->isThermal()) {
                     return pStream;
@@ -1719,25 +2239,31 @@ QGCCameraControl::thermalStreamInstance()
 void
 QGCCameraControl::_requestStreamInfo(uint8_t streamID)
 {
-    qCDebug(CameraControlLog) << "Requesting video stream info for:" << streamID;
-    _vehicle->sendMavCommand(
-        _compID,                                            // Target component
-        MAV_CMD_REQUEST_VIDEO_STREAM_INFORMATION,           // Command id
-        false,                                              // ShowError
-        streamID);                                          // Stream ID
+    QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    operation.vehicle->sendMavCommand(operation.componentId, MAV_CMD_REQUEST_VIDEO_STREAM_INFORMATION, false, streamID);
 }
 
 //-----------------------------------------------------------------------------
 void
 QGCCameraControl::_requestStreamStatus(uint8_t streamID)
 {
-    qCDebug(CameraControlLog) << "Requesting video stream status for:" << streamID;
-    _vehicle->sendMavCommand(
-        _compID,                                            // Target component
-        MAV_CMD_REQUEST_VIDEO_STREAM_STATUS,                // Command id
-        false,                                              // ShowError
-        streamID);                                          // Stream ID
-    _streamStatusTimer.start(1000);                         // Wait up to a second for it
+    if (!_advanceStreamStatusEpoch()) return;
+    QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation)) return;
+    const quint64 statusEpoch = _streamStatusEpoch;
+    const auto raw = _findStream(streamID, false);
+    if (!self || !_streamOperationCurrent(operation) || statusEpoch != _streamStatusEpoch) return;
+    const auto stream = _ownedStream(raw);
+    _streamStatusOperation = operation;
+    _streamStatusTarget = stream;
+    _streamStatusTargetId = streamID;
+    operation.vehicle->sendMavCommand(operation.componentId, MAV_CMD_REQUEST_VIDEO_STREAM_STATUS, false, streamID);
+    if (!self || !_streamOperationCurrent(operation) || statusEpoch != _streamStatusEpoch
+        || _streamStatusTarget != stream || _streamStatusTargetId != streamID) return;
+    _streamStatusTimer.start(1000);
 }
 
 //-----------------------------------------------------------------------------
@@ -1746,7 +2272,7 @@ QGCCameraControl::_findStream(uint8_t id, bool report)
 {
     for(int i = 0; i < _streams.count(); i++) {
         if(_streams[i]) {
-            QGCVideoStreamInfo* pStream = qobject_cast<QGCVideoStreamInfo*>(_streams[i]);
+            const auto pStream = _ownedStream(_streams[i]);
             if(pStream) {
                 if(pStream->streamID() == id) {
                     return pStream;
@@ -1768,7 +2294,7 @@ QGCCameraControl::_findStream(const QString name)
 {
     for(int i = 0; i < _streams.count(); i++) {
         if(_streams[i]) {
-            QGCVideoStreamInfo* pStream = qobject_cast<QGCVideoStreamInfo*>(_streams[i]);
+            const auto pStream = _ownedStream(_streams[i]);
             if(pStream) {
                 if(pStream->name() == name) {
                     return pStream;
@@ -1783,6 +2309,10 @@ QGCCameraControl::_findStream(const QString name)
 void
 QGCCameraControl::_streamTimeout()
 {
+    if (_streamDestroying || _streamExhausted || _streamStructuralBusy) return;
+    QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamOperation();
+    if (!self || !_streamOperationCurrent(operation)) return;
     _requestCount++;
     int count = _expectedCount * 3;
     if(_requestCount > count) {
@@ -1791,13 +2321,17 @@ QGCCameraControl::_streamTimeout()
         //-- If we have at least one stream, work with what we have.
         if(_streams.count()) {
             emit autoStreamChanged();
-            emit _vehicle->cameraManager()->streamChanged();
+            if (!self || !_streamOperationCurrent(operation)) return;
+            const auto manager = operation.manager;
+            if (manager) emit manager->streamChanged();
         }
         return;
     }
     for(uint8_t i = 0; i < _expectedCount; i++) {
         //-- Stream ID starts at 1
-        if(!_findStream(i+1, false)) {
+        const auto found = _findStream(i+1, false);
+        if (!self || !_streamOperationCurrent(operation)) return;
+        if(!_ownedStream(found)) {
             _requestStreamInfo(i+1);
             return;
         }
@@ -1808,10 +2342,14 @@ QGCCameraControl::_streamTimeout()
 void
 QGCCameraControl::_streamStatusTimeout()
 {
-    QGCVideoStreamInfo* pStream = currentStreamInstance();
-    if(pStream) {
-        _requestStreamStatus(static_cast<uint8_t>(pStream->streamID()));
-    }
+    QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamStatusOperation;
+    const auto target = _streamStatusTarget;
+    const int targetId = _streamStatusTargetId;
+    if (!_streamOperationCurrent(operation) || !target || targetId < 0) return;
+    const auto raw = currentStreamInstance();
+    if (!self || !_streamOperationCurrent(operation) || !target || _ownedStream(raw) != target) return;
+    _requestStreamStatus(static_cast<uint8_t>(targetId));
 }
 
 //-----------------------------------------------------------------------------
@@ -2101,6 +2639,8 @@ QGCCameraControl::_dataReady(QByteArray data)
 void
 QGCCameraControl::_paramDone()
 {
+    QPointer<QGCCameraControl> self(this);
+    const quint64 streamEpoch = _streamEpoch;
     for(const QString& param: _paramIO.keys()) {
         if(!_paramIO[param]->paramDone()) {
             return;
@@ -2109,6 +2649,7 @@ QGCCameraControl::_paramDone()
     //-- All parameters loaded (or timed out)
     _paramComplete = true;
     emit parametersReady();
+    if (!self || streamEpoch != _streamEpoch || _streamDestroying || _streamExhausted) return;
     //-- Check for video streaming
     _checkForVideoStreams();
 }
@@ -2117,18 +2658,20 @@ QGCCameraControl::_paramDone()
 void
 QGCCameraControl::_checkForVideoStreams()
 {
-    if(_info.flags & CAMERA_CAP_FLAGS_HAS_VIDEO_STREAM) {
-        //-- Skip it if using Taisync as it has its own video settings
-        if(!qgcApp()->toolbox()->videoManager()->isTaisync()) {
-            connect(&_streamInfoTimer, &QTimer::timeout, this, &QGCCameraControl::_streamTimeout);
-            _streamInfoTimer.setSingleShot(false);
-            connect(&_streamStatusTimer, &QTimer::timeout, this, &QGCCameraControl::_streamStatusTimeout);
-            _streamStatusTimer.setSingleShot(true);
-            //-- Request all streams
-            _requestStreamInfo(0);
-            _streamInfoTimer.start(2000);
-        }
-    }
+    if (!(_info.flags & CAMERA_CAP_FLAGS_HAS_VIDEO_STREAM)) return;
+    QPointer<QGCCameraControl> self(this);
+    const auto operation = _streamOperation();
+    const auto toolbox = _streamToolbox;
+    const auto video = _streamVideoManager;
+    if (!self || !_streamOperationCurrent(operation) || !toolbox || !video
+        || toolbox->videoManager() != video.data()) return;
+    // isTaisync is virtual. Never rediscover a deleted provider from a raw slot.
+    const bool taisync = video->isTaisync();
+    if (!self || !_streamOperationCurrent(operation) || !toolbox || !video
+        || toolbox != _streamToolbox || video != _streamVideoManager || toolbox->videoManager() != video.data() || taisync) return;
+    _requestStreamInfo(0);
+    if (!self || !_streamOperationCurrent(operation) || !video || !toolbox) return;
+    _streamInfoTimer.start(2000);
 }
 
 //-----------------------------------------------------------------------------
@@ -2203,14 +2746,27 @@ QGCCameraControl::wb()
 Fact*
 QGCCameraControl::mode()
 {
-    return _paramComplete && factExists(kCAM_MODE) ? getFact(kCAM_MODE) : nullptr;
+    return _paramComplete ? _ownedCameraModeFact().data() : nullptr;
 }
 
 //-----------------------------------------------------------------------------
 QGCVideoStreamInfo::QGCVideoStreamInfo(QObject* parent, const mavlink_video_stream_information_t *si)
     : QObject(parent)
 {
-    memcpy(&_streamInfo, si, sizeof(mavlink_video_stream_information_t));
+    if (si) {
+        memcpy(&_streamInfo, si, sizeof(mavlink_video_stream_information_t));
+        _lastInformation = _streamInfo;
+    }
+}
+
+QString QGCVideoStreamInfo::uri() const
+{
+    return boundedCameraText(_streamInfo.uri, sizeof(_streamInfo.uri));
+}
+
+QString QGCVideoStreamInfo::name() const
+{
+    return boundedCameraText(_streamInfo.name, sizeof(_streamInfo.name));
 }
 
 //-----------------------------------------------------------------------------
@@ -2228,6 +2784,9 @@ QGCVideoStreamInfo::aspectRatio() const
 bool
 QGCVideoStreamInfo::update(const mavlink_video_stream_status_t* vs)
 {
+    if (!vs) return false;
+    const mavlink_video_stream_status_t status = *vs;
+    vs = &status;
     bool changed = false;
     if(_streamInfo.hfov != vs->hfov) {
         changed = true;

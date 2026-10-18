@@ -1,9 +1,70 @@
 #include "VehicleCapability.h"
+#include "FleetCapabilityEvidence.h"
 
+#include <QCryptographicHash>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QVariant>
+#include <QVariantHash>
 #include <QtMath>
 
+#include <algorithm>
+
 namespace {
+
+QJsonValue canonicalJsonValue(const QVariant& value)
+{
+    if (!value.isValid() || value.isNull()) {
+        return QJsonValue(QJsonValue::Null);
+    }
+
+    if (value.type() == QVariant::Map) {
+        const QVariantMap map = value.toMap();
+        QJsonObject object;
+        QStringList keys = map.keys();
+        std::sort(keys.begin(), keys.end());
+        for (const QString& key : keys) {
+            object.insert(key, canonicalJsonValue(map.value(key)));
+        }
+        return object;
+    }
+
+    if (value.type() == QVariant::Hash) {
+        const QVariantHash hash = value.toHash();
+        QJsonObject object;
+        QStringList keys = hash.keys();
+        std::sort(keys.begin(), keys.end());
+        for (const QString& key : keys) {
+            object.insert(key, canonicalJsonValue(hash.value(key)));
+        }
+        return object;
+    }
+
+    if (value.type() == QVariant::List) {
+        QJsonArray array;
+        const QVariantList list = value.toList();
+        for (const QVariant& item : list) {
+            array.append(canonicalJsonValue(item));
+        }
+        return array;
+    }
+
+    if (value.type() == QVariant::StringList) {
+        QJsonArray array;
+        for (const QString& item : value.toStringList()) {
+            array.append(item);
+        }
+        return array;
+    }
+
+    return QJsonValue::fromVariant(value);
+}
+
+QString trimmedString(const QVariantMap& map, const QString& key)
+{
+    return map.value(key).toString().trimmed();
+}
 
 int readSystemId(const QVariantMap& map, int fallback)
 {
@@ -34,19 +95,11 @@ bool readBool(const QVariantMap& map, const QString& key, bool fallback)
 
 QStringList readCapabilities(const QVariantMap& map)
 {
-    const QVariant value = map.value(QStringLiteral("capabilities"));
-    if (value.canConvert<QStringList>()) {
-        return value.toStringList();
-    }
-
     QStringList result;
-    const QStringList values = value.toString().split(QChar(','), Qt::SkipEmptyParts);
-    for (const QString& item : values) {
-        const QString capability = item.trimmed();
-        if (!capability.isEmpty()) {
-            result.append(capability);
-        }
-    }
+    // Match the Registry/review token contract explicitly. In particular a
+    // CSV value must not become a single QStringList element via canConvert.
+    if (map.contains(QStringLiteral("capabilities")))
+        FleetCapabilityEvidence::canonicalCapabilities(map.value(QStringLiteral("capabilities")), &result);
     return result;
 }
 
@@ -61,6 +114,57 @@ QDateTime readDateTime(const QVariantMap& map, const QString& key)
     }
     const QDateTime parsed = QDateTime::fromString(value.toString(), Qt::ISODate);
     return parsed.isValid() ? parsed.toUTC() : QDateTime();
+}
+
+void preserveDiscoveryEvidence(QVariantMap& metadata, const QVariantMap& descriptor)
+{
+    // Discovery is produced as a top-level adapter contract, while the
+    // registry deliberately keeps backend-specific fields in metadata.  Copy
+    // the evidence fields during the initial parse so a newly registered
+    // vehicle does not lose its verified/invalid state before the first merge.
+    static const QStringList keys = {
+        QStringLiteral("verifiedCapabilities"),
+        QStringLiteral("declaredVerifiedCapabilities"),
+        QStringLiteral("capabilityReviewContext"),
+        QStringLiteral("capabilityApproval"),
+        QStringLiteral("importedCapabilityApproval"),
+        QStringLiteral("capabilityEvidenceState"),
+        QStringLiteral("configurationEvidenceSources"),
+        QStringLiteral("discoveryState"),
+        QStringLiteral("discoveryErrors"),
+        QStringLiteral("discoveredAtUtc"),
+        QStringLiteral("positionEvidenceSource")
+    };
+    for (const QString& key : keys) {
+        if (descriptor.contains(key)) {
+            metadata.insert(key, descriptor.value(key));
+        }
+    }
+}
+
+void exposeDiscoveryEvidence(QVariantMap& descriptor, const QVariantMap& metadata)
+{
+    // Keep the public registry snapshot compatible with the discovery
+    // descriptor contract as well as the metadata fallback used internally.
+    // This makes a registry -> QML/backend round-trip lossless for evidence.
+    static const QStringList keys = {
+        QStringLiteral("verifiedCapabilities"),
+        QStringLiteral("declaredVerifiedCapabilities"),
+        QStringLiteral("capabilityReviewContext"),
+        QStringLiteral("capabilityApproval"),
+        QStringLiteral("importedCapabilityApproval"),
+        QStringLiteral("capabilityEvidenceState"),
+        QStringLiteral("configurationEvidenceSources"),
+        QStringLiteral("discoveryState"),
+        QStringLiteral("discoveryErrors"),
+        QStringLiteral("discoveredAtUtc"),
+        QStringLiteral("positionEvidenceSource")
+    };
+    for (const QString& key : keys) {
+        if (metadata.contains(key)) {
+            descriptor.insert(key, metadata.value(key));
+        }
+    }
 }
 
 }
@@ -99,13 +203,60 @@ VehicleCapability VehicleCapability::fromVariantMap(const QVariantMap& descripto
                                        readDouble(descriptor, QStringLiteral("battery"), -1.0));
     result.linkQualityPercent = qRound(readDouble(descriptor, QStringLiteral("linkQualityPercent"),
                                                  readDouble(descriptor, QStringLiteral("linkQuality"), -1.0)));
-    result.estimatorHealthKnown = descriptor.contains(QStringLiteral("estimatorHealthy"));
+    result.estimatorHealthKnown = descriptor.contains(QStringLiteral("estimatorHealthKnown"))
+        ? readBool(descriptor, QStringLiteral("estimatorHealthKnown"), false)
+        : descriptor.contains(QStringLiteral("estimatorHealthy"));
     result.estimatorHealthy = readBool(descriptor, QStringLiteral("estimatorHealthy"), true);
-    result.positionHealthKnown = descriptor.contains(QStringLiteral("positionHealthy"));
+    result.positionHealthKnown = descriptor.contains(QStringLiteral("positionHealthKnown"))
+        ? readBool(descriptor, QStringLiteral("positionHealthKnown"), false)
+        : descriptor.contains(QStringLiteral("positionHealthy"));
     result.positionHealthy = readBool(descriptor, QStringLiteral("positionHealthy"), true);
     result.hasFault = readBool(descriptor, QStringLiteral("hasFault"), false);
     result.faultSummary = descriptor.value(QStringLiteral("faultSummary")).toString();
+    result.faultHealthKnown = readBool(descriptor, QStringLiteral("faultHealthKnown"), false);
+    result.faultEvidenceAgeMs = qRound(readDouble(descriptor,
+                                                  QStringLiteral("faultEvidenceAgeMs"), -1.0));
     result.metadata = descriptor.value(QStringLiteral("metadata")).toMap();
+    preserveDiscoveryEvidence(result.metadata, descriptor);
+
+    // Configuration is an explicit, static evidence map.  Do not derive it
+    // from the full metadata map because that map also contains changing
+    // battery/link/health observations and would make the fingerprint flap
+    // on every heartbeat.
+    result.configuration = descriptor.value(QStringLiteral("configuration")).toMap();
+    if (result.configuration.isEmpty()) {
+        result.configuration = result.metadata.value(QStringLiteral("configuration")).toMap();
+    }
+    // Always compute the observed fingerprint locally when the evidence map is
+    // present. A vehicle-supplied hash must not be able to hide a changed map.
+    result.configurationFingerprint = result.configuration.isEmpty()
+        ? trimmedString(descriptor, QStringLiteral("configurationFingerprint")).toLower()
+        : fingerprintForConfiguration(result.configuration);
+    result.baselineSource = trimmedString(descriptor, QStringLiteral("baselineSource"));
+    // A baseline is an approval record. Only the explicitly trusted local
+    // manifest source may establish it; telemetry with the same field is
+    // treated as unverified evidence.
+    if (result.baselineSource == QStringLiteral("trusted_manifest")
+        || result.baselineSource == QStringLiteral("local_approval")) {
+        result.baselineConfigurationFingerprint = trimmedString(
+            descriptor, QStringLiteral("baselineConfigurationFingerprint")).toLower();
+        if (result.baselineConfigurationFingerprint.isEmpty()) {
+            const QVariantMap baseline = descriptor.value(QStringLiteral("configurationBaseline")).toMap();
+            if (!baseline.isEmpty()) {
+                result.baselineConfigurationFingerprint = fingerprintForConfiguration(baseline);
+            }
+        }
+    }
+    if (result.configurationFingerprint.isEmpty()) {
+        result.configurationState = QStringLiteral("unknown");
+    } else if (result.baselineConfigurationFingerprint.isEmpty()) {
+        result.configurationState = QStringLiteral("unverified");
+    } else {
+        result.configurationState = result.configurationFingerprint
+                == result.baselineConfigurationFingerprint
+            ? QStringLiteral("baseline")
+            : QStringLiteral("modified");
+    }
     return result;
 }
 
@@ -138,9 +289,28 @@ QVariantMap VehicleCapability::toVariantMap() const
     result[QStringLiteral("positionHealthKnown")] = positionHealthKnown;
     result[QStringLiteral("hasFault")] = hasFault;
     result[QStringLiteral("faultSummary")] = faultSummary;
+    result[QStringLiteral("faultHealthKnown")] = faultHealthKnown;
+    result[QStringLiteral("faultEvidenceAgeMs")] = faultEvidenceAgeMs;
     result[QStringLiteral("healthScore")] = healthScore;
     result[QStringLiteral("healthState")] = healthState;
     result[QStringLiteral("healthReason")] = healthReason;
+    result[QStringLiteral("configuration")] = configuration;
+    result[QStringLiteral("configurationFingerprint")] = configurationFingerprint;
+    result[QStringLiteral("baselineConfigurationFingerprint")] = baselineConfigurationFingerprint;
+    result[QStringLiteral("baselineSource")] = baselineSource;
+    result[QStringLiteral("configurationState")] = configurationState;
     result[QStringLiteral("metadata")] = metadata;
+    exposeDiscoveryEvidence(result, metadata);
     return result;
+}
+
+QString VehicleCapability::fingerprintForConfiguration(const QVariantMap& configuration)
+{
+    if (configuration.isEmpty()) {
+        return QString();
+    }
+
+    const QJsonValue canonical = canonicalJsonValue(configuration);
+    const QByteArray payload = QJsonDocument(canonical.toObject()).toJson(QJsonDocument::Compact);
+    return QString::fromLatin1(QCryptographicHash::hash(payload, QCryptographicHash::Sha256).toHex());
 }

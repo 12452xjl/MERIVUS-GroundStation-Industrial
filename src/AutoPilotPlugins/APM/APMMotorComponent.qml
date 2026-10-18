@@ -29,6 +29,20 @@ SetupPage {
         id:             controller
     }
 
+    // Motor test is a maintenance command with immediate physical effect.
+    // Require a live link and a grounded, disarmed vehicle both for the UI
+    // and again at the slider callback.
+    function _motorTestAllowed() {
+        var vehicle = controller ? controller.vehicle : null
+        return vehicle
+                && vehicle.initialConnectComplete
+                && vehicle.vehicleLinkManager
+                && !vehicle.vehicleLinkManager.communicationLost
+                && !vehicle.armed
+                && !vehicle.flying
+                && typeof vehicle.motorTest === "function"
+    }
+
     Component {
         id: pageComponent
 
@@ -43,7 +57,7 @@ SetupPage {
 
             Row {
                 id:         motorSliders
-                enabled:    safetySwitch.checked
+                enabled:    safetySwitch.checked && motorPage._motorTestAllowed()
                 spacing:    ScreenTools.defaultFontPixelWidth * 4
 
                 Repeater {
@@ -69,6 +83,10 @@ SetupPage {
                             updateValueWhileDragging:   false
 
                             onValueChanged: {
+                                if (!motorPage._motorTestAllowed()) {
+                                    if (value !== 0) value = 0
+                                    return
+                                }
                                 controller.vehicle.motorTest(index + 1, value, value == 0 ? 0 : _motorTimeoutSecs, true)
                                 if (value != 0) {
                                     motorTimer.restart()

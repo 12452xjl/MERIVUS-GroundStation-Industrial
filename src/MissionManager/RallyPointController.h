@@ -62,6 +62,10 @@ signals:
     void loadComplete(void);
 
 private slots:
+    void _managerOperationStarted   (quint64 operationId, int transactionType);
+    void _managerLoadCompleteWithOperationId  (quint64 operationId, bool removeAllRequested);
+    void _managerSendCompleteWithOperationId  (quint64 operationId, bool error);
+    void _managerRemoveAllCompleteWithOperationId(quint64 operationId, bool error);
     void _managerLoadComplete       (void);
     void _managerSendComplete       (bool error);
     void _managerRemoveAllComplete  (bool error);
@@ -76,6 +80,8 @@ private:
     QmlObjectListModel  _points;
     QObject*            _currentRallyPoint =    nullptr;
     bool                _itemsRequested =       false;
+    quint64             _operationId =          0;
+    bool                _operationPending =    false;
 
     static const int    _jsonCurrentVersion = 2;
     static const char*  _jsonFileTypeValue;

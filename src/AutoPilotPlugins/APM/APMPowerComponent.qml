@@ -49,6 +49,19 @@ SetupPage {
 
             property string _restartRequired: qsTr("Requires vehicle reboot")
 
+            // Reboot is a maintenance write. Require a completed handshake,
+            // live transport and a grounded vehicle; each handler repeats the
+            // check so a stale enabled state cannot release the command.
+            function _rebootWriteAllowed() {
+                var vehicle = controller.vehicle
+                return vehicle
+                        && vehicle.initialConnectComplete
+                        && vehicle.vehicleLinkManager
+                        && !vehicle.vehicleLinkManager.communicationLost
+                        && !vehicle.armed
+                        && !vehicle.flying
+            }
+
             QGCPalette { id: ggcPal; colorGroupEnabled: true }
 
             // Battery1 Monitor settings only - used when only monitor param is available
@@ -94,7 +107,16 @@ SetupPage {
                         QGCButton {
                             text:       qsTr("Reboot vehicle")
                             visible:    _showBatt1Reboot
-                            onClicked:  controller.vehicle.rebootVehicle()
+                            enabled:    flowLayout._rebootWriteAllowed()
+                            onClicked: {
+                                if (!flowLayout._rebootWriteAllowed()) {
+                                    mainWindow.showMessageDialog(
+                                                qsTr("Restart blocked"),
+                                                qsTr("Vehicle must be connected, link-ready, disarmed and not flying before restart."))
+                                    return
+                                }
+                                controller.vehicle.rebootVehicle()
+                            }
                         }
                     }
                 }
@@ -181,7 +203,16 @@ SetupPage {
                         QGCButton {
                             text:       qsTr("Reboot vehicle")
                             visible:    _showBatt2Reboot
-                            onClicked:  controller.vehicle.rebootVehicle()
+                            enabled:    flowLayout._rebootWriteAllowed()
+                            onClicked: {
+                                if (!flowLayout._rebootWriteAllowed()) {
+                                    mainWindow.showMessageDialog(
+                                                qsTr("Restart blocked"),
+                                                qsTr("Vehicle must be connected, link-ready, disarmed and not flying before restart."))
+                                    return
+                                }
+                                controller.vehicle.rebootVehicle()
+                            }
                         }
                     }
                 }

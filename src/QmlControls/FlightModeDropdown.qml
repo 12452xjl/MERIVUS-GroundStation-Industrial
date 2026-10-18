@@ -60,6 +60,13 @@ Item {
             }
         }
 
-        onActivated: activeVehicle.flightMode = textAt(index)
+        onActivated: {
+            var controller = (typeof globals !== "undefined") ? globals.guidedControllerFlyView : null
+            if (controller && typeof controller.requestFlightModeChange === "function") {
+                controller.requestFlightModeChange(textAt(index), activeVehicle ? activeVehicle.id : 0)
+            } else if (activeVehicle) {
+                activeVehicle.flightMode = textAt(index)
+            }
+        }
     }
 }

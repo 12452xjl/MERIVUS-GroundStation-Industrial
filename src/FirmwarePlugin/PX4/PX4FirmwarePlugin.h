@@ -13,6 +13,7 @@
 #include "ParameterManager.h"
 #include "PX4ParameterMetaData.h"
 
+#include <QPointer>
 #include <QTimer>
 
 enum class PX4TakeoffHealthCheckStage {
@@ -158,5 +159,7 @@ public:
     quint64 takeoffHealthReportSequence{0};
     double pendingTakeoffAltitudeRelative{0.0};
     bool prearmCheckAcknowledged{false};
-    bool escStatusIntervalPending{false};
+    // One initialization attempt; the live identity is native and per-request.
+    bool escTelemetryRequestStarted{false};
+    QPointer<QObject> escTelemetryIntervalRequest;
 };

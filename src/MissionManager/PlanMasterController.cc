@@ -120,6 +120,12 @@ void PlanMasterController::_activeVehicleChanged(Vehicle* activeVehicle)
         disconnect(_managerVehicle->geoFenceManager(),      nullptr, this, nullptr);
         disconnect(_managerVehicle->rallyPointManager(),    nullptr, this, nullptr);
     }
+    _missionOperationPending = false;
+    _missionOperationId = 0;
+    _geoFenceOperationPending = false;
+    _geoFenceOperationId = 0;
+    _rallyOperationPending = false;
+    _rallyOperationId = 0;
 
     bool newOffline = false;
     if (activeVehicle == nullptr) {
@@ -136,12 +142,32 @@ void PlanMasterController::_activeVehicleChanged(Vehicle* activeVehicle)
         appSettings->offlineEditingVehicleClass()->setRawValue(QGCMAVLink::vehicleClass(_managerVehicle->vehicleType()));
 
         // We use these signals to sequence upload and download to the multiple controller/managers
-        connect(_managerVehicle->missionManager(),      &MissionManager::newMissionItemsAvailable,  this, &PlanMasterController::_loadMissionComplete);
-        connect(_managerVehicle->geoFenceManager(),     &GeoFenceManager::loadComplete,             this, &PlanMasterController::_loadGeoFenceComplete);
-        connect(_managerVehicle->rallyPointManager(),   &RallyPointManager::loadComplete,           this, &PlanMasterController::_loadRallyPointsComplete);
-        connect(_managerVehicle->missionManager(),      &MissionManager::sendComplete,              this, &PlanMasterController::_sendMissionComplete);
-        connect(_managerVehicle->geoFenceManager(),     &GeoFenceManager::sendComplete,             this, &PlanMasterController::_sendGeoFenceComplete);
-        connect(_managerVehicle->rallyPointManager(),   &RallyPointManager::sendComplete,           this, &PlanMasterController::_sendRallyPointsComplete);
+        connect(_managerVehicle->missionManager(),      &MissionManager::newMissionItemsAvailableWithOperationId,  this, &PlanMasterController::_loadMissionComplete);
+        connect(_managerVehicle->geoFenceManager(),     &PlanManager::newMissionItemsAvailableWithOperationId, this, &PlanMasterController::_loadGeoFenceComplete);
+        connect(_managerVehicle->rallyPointManager(),   &PlanManager::newMissionItemsAvailableWithOperationId, this, &PlanMasterController::_loadRallyPointsComplete);
+        connect(_managerVehicle->missionManager(),      &MissionManager::sendCompleteWithOperationId,              this, &PlanMasterController::_sendMissionComplete);
+        connect(_managerVehicle->geoFenceManager(),     &PlanManager::sendCompleteWithOperationId, this, &PlanMasterController::_sendGeoFenceComplete);
+        connect(_managerVehicle->rallyPointManager(),   &PlanManager::sendCompleteWithOperationId, this, &PlanMasterController::_sendRallyPointsComplete);
+
+        // Capture the operation identity before a manager can complete
+        // synchronously.  Reading activeOperationId() only after the start
+        // call races with _finishTransaction(), which clears the active id
+        // before emitting the completion signal.
+        connect(_managerVehicle->missionManager(), &PlanManager::operationStarted, this, [this](quint64 operationId, int transactionType) {
+            Q_UNUSED(transactionType)
+            _missionOperationId = operationId;
+            _missionOperationPending = operationId != 0;
+        });
+        connect(_managerVehicle->geoFenceManager(), &PlanManager::operationStarted, this, [this](quint64 operationId, int transactionType) {
+            Q_UNUSED(transactionType)
+            _geoFenceOperationId = operationId;
+            _geoFenceOperationPending = operationId != 0;
+        });
+        connect(_managerVehicle->rallyPointManager(), &PlanManager::operationStarted, this, [this](quint64 operationId, int transactionType) {
+            Q_UNUSED(transactionType)
+            _rallyOperationId = operationId;
+            _rallyOperationPending = operationId != 0;
+        });
     }
 
     _offline = newOffline;
@@ -202,6 +228,12 @@ void PlanMasterController::_activeVehicleChanged(Vehicle* activeVehicle)
 
 void PlanMasterController::loadFromVehicle(void)
 {
+    if (!_managerVehicle || !_managerVehicle->isInitialConnectComplete()
+            || !_managerVehicle->vehicleLinkManager()
+            || _managerVehicle->vehicleLinkManager()->communicationLost()) {
+        qCWarning(PlanMasterControllerLog) << "PlanMasterController::loadFromVehicle blocked: vehicle is not ready";
+        return;
+    }
     WeakLinkInterfacePtr weakLink = _managerVehicle->vehicleLinkManager()->primaryLink();
     if (weakLink.expired()) {
         // Vehicle is shutting down
@@ -224,81 +256,184 @@ void PlanMasterController::loadFromVehicle(void)
         _loadGeoFence = true;
         qCDebug(PlanMasterControllerLog) << "PlanMasterController::loadFromVehicle calling _missionController.loadFromVehicle";
         _missionController.loadFromVehicle();
+        if (const quint64 operationId = _managerVehicle->missionManager()->activeOperationId(); operationId != 0) {
+            _missionOperationId = operationId;
+            _missionOperationPending = true;
+        } else if (!_missionOperationPending) {
+            _loadGeoFence = false;
+            _loadRallyPoints = false;
+            qCWarning(PlanMasterControllerLog) << "PlanMasterController::loadFromVehicle mission manager did not create an operation";
+        }
         setDirty(false);
     }
 }
 
 
-void PlanMasterController::_loadMissionComplete(void)
+void PlanMasterController::_loadMissionComplete(quint64 operationId, bool removeAllRequested)
 {
+    Q_UNUSED(removeAllRequested)
+    if (!_missionOperationPending || operationId != _missionOperationId) {
+        qCDebug(PlanMasterControllerLog) << "PlanMasterController::_loadMissionComplete ignored completion without matching mission operation" << operationId << _missionOperationId;
+        return;
+    }
+    _missionOperationPending = false;
     if (!_flyView && _loadGeoFence) {
         _loadGeoFence = false;
         _loadRallyPoints = true;
         if (_geoFenceController.supported()) {
             qCDebug(PlanMasterControllerLog) << "PlanMasterController::_loadMissionComplete calling _geoFenceController.loadFromVehicle";
             _geoFenceController.loadFromVehicle();
+            if (const quint64 operationId = _managerVehicle->geoFenceManager()->activeOperationId(); operationId != 0) {
+                _geoFenceOperationId = operationId;
+                _geoFenceOperationPending = true;
+            } else if (!_geoFenceOperationPending) {
+                _loadRallyPoints = false;
+                qCWarning(PlanMasterControllerLog) << "PlanMasterController::_loadMissionComplete geofence manager did not create an operation";
+            }
         } else {
             qCDebug(PlanMasterControllerLog) << "PlanMasterController::_loadMissionComplete GeoFence not supported skipping";
             _geoFenceController.removeAll();
-            _loadGeoFenceComplete();
+            _loadGeoFenceComplete(0, false);
         }
         setDirty(false);
     }
 }
 
-void PlanMasterController::_loadGeoFenceComplete(void)
+void PlanMasterController::_loadGeoFenceComplete(quint64 operationId, bool removeAllRequested)
 {
+    Q_UNUSED(removeAllRequested)
+    if ((_geoFenceOperationPending && operationId != _geoFenceOperationId)
+        || (!_geoFenceOperationPending && operationId != 0)
+        || (operationId == 0 && _geoFenceController.supported())) {
+        qCDebug(PlanMasterControllerLog) << "PlanMasterController::_loadGeoFenceComplete ignored completion without matching geofence operation" << operationId << _geoFenceOperationId;
+        return;
+    }
+    _geoFenceOperationPending = false;
     if (!_flyView && _loadRallyPoints) {
         _loadRallyPoints = false;
         if (_rallyPointController.supported()) {
             qCDebug(PlanMasterControllerLog) << "PlanMasterController::_loadGeoFenceComplete calling _rallyPointController.loadFromVehicle";
             _rallyPointController.loadFromVehicle();
+            if (const quint64 operationId = _managerVehicle->rallyPointManager()->activeOperationId(); operationId != 0) {
+                _rallyOperationId = operationId;
+                _rallyOperationPending = true;
+            } else if (!_rallyOperationPending) {
+                qCWarning(PlanMasterControllerLog) << "PlanMasterController::_loadGeoFenceComplete rally manager did not create an operation";
+            }
         } else {
             qCDebug(PlanMasterControllerLog) << "PlanMasterController::_loadMissionComplete Rally Points not supported skipping";
             _rallyPointController.removeAll();
-            _loadRallyPointsComplete();
+            _loadRallyPointsComplete(0, false);
         }
         setDirty(false);
     }
 }
 
-void PlanMasterController::_loadRallyPointsComplete(void)
+void PlanMasterController::_loadRallyPointsComplete(quint64 operationId, bool removeAllRequested)
 {
+    Q_UNUSED(removeAllRequested)
+    if ((_rallyOperationPending && operationId != _rallyOperationId)
+        || (!_rallyOperationPending && operationId != 0)
+        || (operationId == 0 && _rallyPointController.supported())) {
+        qCDebug(PlanMasterControllerLog) << "PlanMasterController::_loadRallyPointsComplete ignored completion without matching rally operation" << operationId << _rallyOperationId;
+        return;
+    }
+    _rallyOperationPending = false;
     qCDebug(PlanMasterControllerLog) << "PlanMasterController::_loadRallyPointsComplete";
 }
 
-void PlanMasterController::_sendMissionComplete(void)
+void PlanMasterController::_sendMissionComplete(quint64 operationId, bool error)
 {
+    if (!_missionOperationPending || operationId != _missionOperationId) {
+        qCDebug(PlanMasterControllerLog) << "PlanMasterController::_sendMissionComplete ignored completion without matching mission operation" << operationId << _missionOperationId;
+        return;
+    }
+    _missionOperationPending = false;
+    if (error) {
+        // Do not chain a fence/rally upload after a mission upload failure.
+        _sendGeoFence = false;
+        _sendRallyPoints = false;
+        if (_deleteWhenSendCompleted) {
+            deleteLater();
+        }
+        return;
+    }
     if (_sendGeoFence) {
         _sendGeoFence = false;
         _sendRallyPoints = true;
         if (_geoFenceController.supported()) {
             qCDebug(PlanMasterControllerLog) << "PlanMasterController::sendToVehicle start GeoFence sendToVehicle";
             _geoFenceController.sendToVehicle();
+            if (const quint64 operationId = _managerVehicle->geoFenceManager()->activeOperationId(); operationId != 0) {
+                _geoFenceOperationId = operationId;
+                _geoFenceOperationPending = true;
+            } else if (!_geoFenceOperationPending) {
+                _sendRallyPoints = false;
+                qCWarning(PlanMasterControllerLog) << "PlanMasterController::_sendMissionComplete geofence manager did not create an operation";
+                if (_deleteWhenSendCompleted) {
+                    deleteLater();
+                }
+            }
         } else {
             qCDebug(PlanMasterControllerLog) << "PlanMasterController::sendToVehicle GeoFence not supported skipping";
-            _sendGeoFenceComplete();
+            _sendGeoFenceComplete(0, false);
         }
         setDirty(false);
     }
 }
 
-void PlanMasterController::_sendGeoFenceComplete(void)
+void PlanMasterController::_sendGeoFenceComplete(quint64 operationId, bool error)
 {
+    if ((_geoFenceOperationPending && operationId != _geoFenceOperationId)
+        || (!_geoFenceOperationPending && operationId != 0)
+        || (operationId == 0 && _geoFenceController.supported())) {
+        qCDebug(PlanMasterControllerLog) << "PlanMasterController::_sendGeoFenceComplete ignored completion without matching geofence operation" << operationId << _geoFenceOperationId;
+        return;
+    }
+    _geoFenceOperationPending = false;
+    if (error) {
+        _sendRallyPoints = false;
+        if (_deleteWhenSendCompleted) {
+            deleteLater();
+        }
+        return;
+    }
     if (_sendRallyPoints) {
         _sendRallyPoints = false;
         if (_rallyPointController.supported()) {
             qCDebug(PlanMasterControllerLog) << "PlanMasterController::sendToVehicle start rally sendToVehicle";
             _rallyPointController.sendToVehicle();
+            if (const quint64 operationId = _managerVehicle->rallyPointManager()->activeOperationId(); operationId != 0) {
+                _rallyOperationId = operationId;
+                _rallyOperationPending = true;
+            } else if (!_rallyOperationPending) {
+                qCWarning(PlanMasterControllerLog) << "PlanMasterController::_sendGeoFenceComplete rally manager did not create an operation";
+                if (_deleteWhenSendCompleted) {
+                    deleteLater();
+                }
+            }
         } else {
             qCDebug(PlanMasterControllerLog) << "PlanMasterController::sendToVehicle Rally Points not support skipping";
-            _sendRallyPointsComplete();
+            _sendRallyPointsComplete(0, false);
         }
     }
 }
 
-void PlanMasterController::_sendRallyPointsComplete(void)
+void PlanMasterController::_sendRallyPointsComplete(quint64 operationId, bool error)
 {
+    if ((_rallyOperationPending && operationId != _rallyOperationId)
+        || (!_rallyOperationPending && operationId != 0)
+        || (operationId == 0 && _rallyPointController.supported())) {
+        qCDebug(PlanMasterControllerLog) << "PlanMasterController::_sendRallyPointsComplete ignored completion without matching rally operation" << operationId << _rallyOperationId;
+        return;
+    }
+    _rallyOperationPending = false;
+    if (error) {
+        if (_deleteWhenSendCompleted) {
+            deleteLater();
+        }
+        return;
+    }
     qCDebug(PlanMasterControllerLog) << "PlanMasterController::sendToVehicle Rally Point send complete";
     if (_deleteWhenSendCompleted) {
         this->deleteLater();
@@ -307,26 +442,60 @@ void PlanMasterController::_sendRallyPointsComplete(void)
 
 void PlanMasterController::sendToVehicle(void)
 {
+    if (!_managerVehicle || !_managerVehicle->isInitialConnectComplete()
+            || !_managerVehicle->vehicleLinkManager()
+            || _managerVehicle->vehicleLinkManager()->communicationLost()
+            || _managerVehicle->armed() || _managerVehicle->flying()) {
+        qCWarning(PlanMasterControllerLog) << "PlanMasterController::sendToVehicle blocked: vehicle is not ready or is armed/flying";
+        if (_deleteWhenSendCompleted) {
+            deleteLater();
+        }
+        return;
+    }
     WeakLinkInterfacePtr weakLink = _managerVehicle->vehicleLinkManager()->primaryLink();
     if (weakLink.expired()) {
         // Vehicle is shutting down
+        if (_deleteWhenSendCompleted) {
+            deleteLater();
+        }
         return;
     } else {
         SharedLinkInterfacePtr sharedLink = weakLink.lock();
         if (sharedLink->linkConfiguration()->isHighLatency()) {
             qgcApp()->showAppMessage(tr("Upload not supported on high latency links."));
+            if (_deleteWhenSendCompleted) {
+                deleteLater();
+            }
             return;
         }
     }
 
     if (offline()) {
         qCWarning(PlanMasterControllerLog) << "PlanMasterController::sendToVehicle called while offline";
+        if (_deleteWhenSendCompleted) {
+            deleteLater();
+        }
     } else if (syncInProgress()) {
         qCWarning(PlanMasterControllerLog) << "PlanMasterController::sendToVehicle called while syncInProgress";
+        if (_deleteWhenSendCompleted) {
+            deleteLater();
+        }
     } else {
         qCDebug(PlanMasterControllerLog) << "PlanMasterController::sendToVehicle start mission sendToVehicle";
         _sendGeoFence = true;
         _missionController.sendToVehicle();
+        if (const quint64 operationId = _managerVehicle->missionManager()->activeOperationId(); operationId != 0) {
+            _missionOperationId = operationId;
+            _missionOperationPending = true;
+        }
+        if (!_missionOperationPending) {
+            _sendGeoFence = false;
+            _sendRallyPoints = false;
+            qCWarning(PlanMasterControllerLog) << "PlanMasterController::sendToVehicle mission manager did not create an operation";
+            if (_deleteWhenSendCompleted) {
+                deleteLater();
+            }
+        }
         setDirty(false);
     }
 }
@@ -516,7 +685,13 @@ void PlanMasterController::removeAll(void)
 
 void PlanMasterController::removeAllFromVehicle(void)
 {
-    if (!offline()) {
+    if (!offline()
+            && _managerVehicle
+            && _managerVehicle->isInitialConnectComplete()
+            && _managerVehicle->vehicleLinkManager()
+            && !_managerVehicle->vehicleLinkManager()->communicationLost()
+            && !_managerVehicle->armed()
+            && !_managerVehicle->flying()) {
         _missionController.removeAllFromVehicle();
         if (_geoFenceController.supported()) {
             _geoFenceController.removeAllFromVehicle();
@@ -526,7 +701,7 @@ void PlanMasterController::removeAllFromVehicle(void)
         }
         setDirty(false);
     } else {
-        qWarning() << "PlanMasterController::removeAllFromVehicle called while offline";
+        qWarning() << "PlanMasterController::removeAllFromVehicle blocked: vehicle is offline, not ready, disconnected, armed, or flying";
     }
 }
 
@@ -586,6 +761,14 @@ void PlanMasterController::sendPlanToVehicle(Vehicle* vehicle, const QString& fi
 
 void PlanMasterController::_showPlanFromManagerVehicle(void)
 {
+    if (_managerVehicle && _managerVehicle->missionManager()->inProgress()) {
+        _missionOperationId = _managerVehicle->missionManager()->activeOperationId();
+        _missionOperationPending = _missionOperationId != 0;
+    } else {
+        _missionOperationId = 0;
+        _missionOperationPending = false;
+    }
+
     if (!_managerVehicle->initialPlanRequestComplete() && !syncInProgress()) {
         // Something went wrong with initial load. All controllers are idle, so just force it off
         _managerVehicle->forceInitialPlanRequestComplete();

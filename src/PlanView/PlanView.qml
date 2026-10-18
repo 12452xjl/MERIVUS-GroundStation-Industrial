@@ -51,6 +51,12 @@ Item {
     property var    _appSettings:                       QGroundControl.settingsManager.appSettings
     property var    _planViewSettings:                  QGroundControl.settingsManager.planViewSettings
     property bool   _promptForPlanUsageShowing:         false
+    // Bind a plan write to the exact active Vehicle object observed when the
+    // operator begins the action. This prevents a delayed confirmation from
+    // retargeting an upload/clear operation after an active-vehicle switch.
+    property var    _planWriteTargetVehicle:             null
+    property int    _planWriteTargetVehicleId:           0
+    property string _planWriteOperation:                 ""
 
     readonly property var       _layers:                [_layerMission, _layerGeoFence, _layerRallyPoints]
 
@@ -65,6 +71,59 @@ Item {
         coordinate.longitude = coordinate.longitude.toFixed(_decimalPlaces)
         coordinate.altitude  = coordinate.altitude.toFixed(_decimalPlaces)
         return coordinate
+    }
+
+    function _planWriteGate(vehicle) {
+        if (!vehicle || !vehicle.id) {
+            return { allowed: false, code: "no_target",
+                     message: qsTr("没有可用的任务写入目标。") }
+        }
+        var controller = globals.guidedControllerFlyView
+        if (!controller || !controller.fleetHealthCenter
+                || typeof controller.fleetHealthCenter.evaluateTaskGate !== "function") {
+            return { allowed: false, code: "health_source_unavailable",
+                     message: qsTr("舰队健康门禁尚未就绪，任务写入已阻止。") }
+        }
+        var gate = controller.fleetHealthCenter.evaluateTaskGate([Number(vehicle.id)], false)
+        if (!gate || gate.allowed !== true) {
+            return { allowed: false, code: "health_gate_blocked", gate: gate,
+                     message: qsTr("目标 UAV-%1 未通过舰队健康门禁。").arg(vehicle.id) }
+        }
+        return { allowed: true, code: "ready", gate: gate }
+    }
+
+    function _capturePlanWriteTarget(operation) {
+        var vehicle = QGroundControl.multiVehicleManager.activeVehicle
+        var gate = _planWriteGate(vehicle)
+        if (!gate.allowed) {
+            mainWindow.showMessageDialog(qsTr("任务写入已阻止"), gate.message)
+            return false
+        }
+        _planWriteTargetVehicle = vehicle
+        _planWriteTargetVehicleId = Number(vehicle.id)
+        _planWriteOperation = String(operation || "")
+        return true
+    }
+
+    function _planWriteTargetStillValid() {
+        var vehicle = QGroundControl.multiVehicleManager.activeVehicle
+        if (!vehicle || !_planWriteTargetVehicle
+                || vehicle !== _planWriteTargetVehicle
+                || Number(vehicle.id) !== _planWriteTargetVehicleId
+                || !vehicle.initialConnectComplete
+                || !vehicle.vehicleLinkManager
+                || vehicle.vehicleLinkManager.communicationLost) {
+            return false
+        }
+        return _planWriteGate(vehicle).allowed === true
+    }
+
+    function _rejectPlanWriteTarget() {
+        mainWindow.showMessageDialog(qsTr("任务写入已阻止"),
+                                     qsTr("确认期间任务目标、链路或健康状态发生变化，请重新确认后再写入。"))
+        _planWriteTargetVehicle = null
+        _planWriteTargetVehicleId = 0
+        _planWriteOperation = ""
     }
 
     property bool _firstMissionLoadComplete:    false
@@ -165,6 +224,12 @@ Item {
             globals.planMasterControllerPlanView = _planMasterController
         }
 
+        Component.onDestruction: {
+            if (globals.planMasterControllerPlanView === _planMasterController) {
+                globals.planMasterControllerPlanView = null
+            }
+        }
+
         onPromptForPlanUsageOnVehicleChange: {
             if (!_promptForPlanUsageShowing) {
                 _promptForPlanUsageShowing = true
@@ -197,9 +262,16 @@ Item {
             if (!checkReadyForSaveUpload(false /* save */)) {
                 return
             }
+            if (!_root._capturePlanWriteTarget("upload")) {
+                return
+            }
             switch (_missionController.sendToVehiclePreCheck()) {
                 case MissionController.SendToVehiclePreCheckStateOk:
-                    sendToVehicle()
+                    if (_root._planWriteTargetStillValid()) {
+                        sendToVehicle()
+                    } else {
+                        _root._rejectPlanWriteTarget()
+                    }
                     break
                 case MissionController.SendToVehiclePreCheckStateActiveMission:
                     mainWindow.showMessageDialog(qsTr("Send To Vehicle"), qsTr("Current mission must be paused prior to uploading a new Plan"))
@@ -211,7 +283,13 @@ Item {
                                                       "It is recommended to recreate the Plan for the correct firmware/vehicle type.\n\n" +
                                                       "Click 'Ok' to upload the Plan anyway."),
                                                  StandardButton.Ok | StandardButton.Cancel,
-                                                 function() { _planMasterController.sendToVehicle() })
+                                                 function() {
+                                                     if (_root._planWriteTargetStillValid()) {
+                                                         _planMasterController.sendToVehicle()
+                                                     } else {
+                                                         _root._rejectPlanWriteTarget()
+                                                     }
+                                                 })
                     break
             }
         }
@@ -808,10 +886,20 @@ Item {
     }
 
     function clearButtonClicked() {
+        if (!_capturePlanWriteTarget("clear")) {
+            return
+        }
         mainWindow.showMessageDialog(qsTr("Clear"),
                                      qsTr("Are you sure you want to remove all mission items and clear the mission from the vehicle?"),
                                      StandardButton.Yes | StandardButton.Cancel,
-                                     function() { _planMasterController.removeAllFromVehicle(); _missionController.setCurrentPlanViewSeqNum(0, true) })
+                                     function() {
+                                         if (!_planWriteTargetStillValid()) {
+                                             _rejectPlanWriteTarget()
+                                             return
+                                         }
+                                         _planMasterController.removeAllFromVehicle()
+                                         _missionController.setCurrentPlanViewSeqNum(0, true)
+                                     })
     }
 
     //- ToolStrip DropPanel Components

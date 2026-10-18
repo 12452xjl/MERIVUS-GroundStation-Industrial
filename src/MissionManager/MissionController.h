@@ -18,6 +18,9 @@
 #include "QGroundControlQmlGlobal.h"
 
 #include <QHash>
+#include <QElapsedTimer>
+#include <QPointer>
+#include <QTimer>
 
 class FlightPathSegment;
 class VisualMissionItem;
@@ -166,6 +169,13 @@ public:
     Q_INVOKABLE VisualMissionItem*  insertComplexMissionItemFromKMLOrSHP(QString itemName, QString file, int visualItemIndex, bool makeCurrentItem = false);
 
     Q_INVOKABLE void resumeMission(int resumeIndex);
+    // Request-correlated variant used by the MERIVUS confirmation path.
+    // This correlates local upload evidence, not an execution authorization.
+    Q_INVOKABLE QVariantMap resumeSourceSnapshot(QObject* expectedVehicle) const;
+    Q_INVOKABLE bool resumeMissionForRequest(int resumeIndex, const QString& requestId,
+                                           QObject* expectedVehicle, const QVariantMap& expectedSource);
+    Q_INVOKABLE bool resumeUploadMatches(const QString& requestId, const QString& operationId,
+                                        const QString& contentFingerprint) const;
 
     /// Updates the altitudes of the items in the current mission to the new default altitude
     Q_INVOKABLE void applyDefaultMissionAltitude(void);
@@ -274,6 +284,9 @@ signals:
     void resumeMissionIndexChanged          (void);
     void resumeMissionReady                 (void);
     void resumeMissionUploadFail            (void);
+    void resumeMissionReadyForRequest       (const QString& requestId, const QString& operationId,
+                                             int uploadedItemCount, const QString& contentFingerprint);
+    void resumeMissionUploadFailForRequest  (const QString& requestId, const QString& operationId);
     void batteryChangePointChanged          (int batteryChangePoint);
     void batteriesRequiredChanged           (int batteriesRequired);
     void plannedHomePositionChanged         (QGeoCoordinate plannedHomePosition);
@@ -300,6 +313,8 @@ signals:
     void globalAltitudeModeChanged          (void);
 
 private slots:
+    void _missionOperationStarted              (quint64 operationId, int transactionType);
+    void _newMissionItemsAvailableWithOperationId(quint64 operationId, bool removeAllRequested);
     void _newMissionItemsAvailableFromVehicle   (bool removeAllRequested);
     void _itemCommandChanged                    (void);
     void _inProgressChanged                     (bool inProgress);
@@ -311,6 +326,11 @@ private slots:
     void _visualItemsDirtyChanged               (bool dirty);
     void _managerSendComplete                   (bool error);
     void _managerRemoveAllComplete              (bool error);
+    void _managerSendCompleteWithOperationId    (quint64 operationId, bool error);
+    void _managerRemoveAllCompleteWithOperationId(quint64 operationId, bool error);
+    void _managerResumeMissionReadyWithOperationId(quint64 operationId);
+    void _managerResumeMissionUploadFailWithOperationId(quint64 operationId);
+    void _deliverResumeContinuation            (void);
     void _updateTimeout                         (void);
     void _complexBoundingBoxChanged             (void);
     void _recalcAll                             (void);
@@ -318,6 +338,8 @@ private slots:
     void _takeoffItemNotRequiredChanged         (void);
 
 private:
+    bool                    _beginResumeMission                 (int resumeIndex, const QString& requestId);
+    void                    _clearResumeContinuation            (void);
     void                    _init                               (void);
     void                    _recalcSequence                     (void);
     void                    _recalcChildItems                   (void);
@@ -364,6 +386,24 @@ private:
     Vehicle*                    _controllerVehicle =            nullptr;
     Vehicle*                    _managerVehicle =               nullptr;
     MissionManager*             _missionManager =               nullptr;
+    quint64                      _missionOperationId =            0;
+    int                          _missionOperationType =          0;
+    struct ResumeContinuation {
+        QPointer<Vehicle> vehicle;
+        QPointer<MissionManager> manager;
+        QString requestId;
+        quint64 operationId = 0;
+        QString contentFingerprint;
+        int uploadedItemCount = 0;
+        bool completionPending = false;
+        bool error = false;
+    };
+    ResumeContinuation          _resumeContinuation;
+    ResumeContinuation          _resumeReceipt;
+    QTimer                      _resumeContinuationTimer;
+    QElapsedTimer               _resumeContinuationClock;
+    bool                        _resumeDispatching = false;
+    QString                     _resumeSourceEpoch;
     int                         _missionItemCount =             0;
     QmlObjectListModel*         _visualItems =                  nullptr;
     MissionSettingsItem*        _settingsItem =                 nullptr;

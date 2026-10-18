@@ -174,7 +174,12 @@ Rectangle {
 
                             onClicked: {
                                 var vehicle = QGroundControl.multiVehicleManager.activeVehicle
-                                object.sendTo(vehicle)
+                                if (guidedController
+                                        && typeof guidedController.confirmCustomAction === "function") {
+                                    _root.visible = false
+                                    guidedController.confirmCustomAction(object,
+                                                                         vehicle ? vehicle.id : 0)
+                                }
                             }
                         }
                     } // ColumnLayout

@@ -57,7 +57,13 @@ Item {
                             text: modelData
                             Layout.fillWidth: true
                             onClicked: {
-                                activeVehicle.flightMode = text
+                                var controller = typeof globals !== "undefined"
+                                        ? globals.guidedControllerFlyView : null
+                                if (controller && typeof controller.requestFlightModeChange === "function") {
+                                    controller.requestFlightModeChange(text, activeVehicle ? activeVehicle.id : 0)
+                                } else {
+                                    activeVehicle.flightMode = text
+                                }
                                 mainWindow.hideIndicatorPopup()
                             }
                         }

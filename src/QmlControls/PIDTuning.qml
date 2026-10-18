@@ -43,6 +43,17 @@ RowLayout {
     readonly property int _tickSeparation:      5
     readonly property int _maxTickSections:     10
 
+    function _requestAutoFlightMode(mode) {
+        var controller = globals.guidedControllerFlyView
+        if (controller && typeof controller.requestFlightModeChange === "function") {
+            controller.requestFlightModeChange(mode, globals.activeVehicle ? globals.activeVehicle.id : 0)
+            return
+        }
+        if (globals.activeVehicle) {
+            globals.activeVehicle.flightMode = mode
+        }
+    }
+
     function adjustYAxisMin(yAxis, newValue) {
         var newMin = Math.min(yAxis.min, newValue)
         if (newMin % 5 != 0) {
@@ -352,7 +363,7 @@ RowLayout {
                     dataTimer.running = !dataTimer.running
                     _last_t = 0
                     if (showAutoModeChange && autoModeChange.checked) {
-                        globals.activeVehicle.flightMode = dataTimer.running ? "Stabilized" : globals.activeVehicle.pauseFlightMode
+                        _requestAutoFlightMode(dataTimer.running ? "Stabilized" : globals.activeVehicle.pauseFlightMode)
                     }
                 }
             }

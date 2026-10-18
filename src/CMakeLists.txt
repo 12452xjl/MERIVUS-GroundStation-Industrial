@@ -92,6 +92,8 @@ add_library(qgc
 	QGCConfig.h
 	QGCFileDownload.cc
 	QGCFileDownload.h
+	QGCOwnedDownloadFile.cc
+	QGCOwnedDownloadFile.h
 	QGCLoggingCategory.cc
 	QGCLoggingCategory.h
 	QGCMapPalette.cc

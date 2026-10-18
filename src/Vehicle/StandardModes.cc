@@ -10,14 +10,19 @@
 #include "Vehicle.h"
 #include "StandardModes.h"
 
+#include <QPointer>
+#include <limits>
+
 QGC_LOGGING_CATEGORY(StandardModesLog, "StandardModesLog")
 
 
 static void requestMessageResultHandler(void* resultHandlerData, MAV_RESULT result,
                                         Vehicle::RequestMessageResultHandlerFailureCode_t failureCode, const mavlink_message_t &message)
 {
-    StandardModes* standardModes = static_cast<StandardModes*>(resultHandlerData);
-    standardModes->gotMessage(result, message);
+    // The dispatcher checks the supplied callbackOwner before calling this
+    // borrowed-data adapter; keep it pinned through the synchronous receiver.
+    const QPointer<StandardModes> standardModes(static_cast<StandardModes*>(resultHandlerData));
+    if (standardModes) standardModes->gotMessage(result, message);
 }
 
 StandardModes::StandardModes(QObject *parent, Vehicle *vehicle)
@@ -27,6 +32,12 @@ StandardModes::StandardModes(QObject *parent, Vehicle *vehicle)
 
 void StandardModes::gotMessage(MAV_RESULT result, const mavlink_message_t &message)
 {
+    const QPointer<StandardModes> self(this);
+    const QPointer<Vehicle> vehicle(_vehicle);
+    const quint64 generation = _readGeneration;
+    const auto current = [&]() { return self && vehicle && _vehicle == vehicle.data()
+        && generation != 0 && !_readGenerationExhausted && _readGeneration == generation; };
+    if (!current()) return;
     _requestActive = false;
     if (_wantReset) {
         _wantReset = false;
@@ -85,6 +96,10 @@ void StandardModes::gotMessage(MAV_RESULT result, const mavlink_message_t &messa
             ensureUniqueModeNames();
             _hasModes = true;
             emit modesUpdated();
+            if (!current()) return;
+            // A modesUpdated observer may have explicitly started a new read.
+            // Its eventual result, not this old publication, completes it.
+            if (_requestActive) return;
             emit requestCompleted();
 
         } else {
@@ -114,13 +129,30 @@ void StandardModes::ensureUniqueModeNames()
 
 void StandardModes::request()
 {
+    const QPointer<StandardModes> self(this);
+    const QPointer<Vehicle> vehicle(_vehicle);
+    if (!self || !vehicle) return;
 #ifdef DAILY_BUILD // Disable use of development/WIP MAVLink messages for release builds
     if (_requestActive) {
         // If we are in the middle of waiting for a request, wait for the response first
         _wantReset = true;
         return;
     }
+#endif
+    if (_readGenerationExhausted) return;
+    if (_readGeneration == std::numeric_limits<quint64>::max()) {
+        // A final local failure is published once, with no wrapped/reused list
+        // identity and no new read. Nested requests see the exhausted flag.
+        _readGenerationExhausted = true;
+        _requestActive = false;
+        _wantReset = false;
+        qCWarning(StandardModesLog) << "Standard mode list generation exhausted";
+        emit requestCompleted();
+        return;
+    }
+    ++_readGeneration;
 
+#ifdef DAILY_BUILD
     _nextModes.clear();
 
     qCDebug(StandardModesLog) << "Requesting available modes";
@@ -133,12 +165,16 @@ void StandardModes::request()
 
 void StandardModes::requestMode(int modeIndex)
 {
+    const QPointer<StandardModes> self(this);
+    const QPointer<Vehicle> vehicle(_vehicle);
+    if (!vehicle || _readGeneration == 0 || _readGenerationExhausted) return;
     _requestActive = true;
-    _vehicle->requestMessage(
+    vehicle->requestMessage(
             requestMessageResultHandler,
-            this,
+            self.data(),
             MAV_COMP_ID_AUTOPILOT1,
-            MAVLINK_MSG_ID_AVAILABLE_MODES, modeIndex);
+            MAVLINK_MSG_ID_AVAILABLE_MODES, modeIndex,
+            0.0f, 0.0f, 0.0f, 0.0f, self.data());
 }
 
 void StandardModes::availableModesMonitorReceived(uint8_t seq)

@@ -32,6 +32,26 @@ Item {
     property bool   _showRCToParam:     _activeVehicle.px4Firmware
     property var    _appSettings:       QGroundControl.settingsManager.appSettings
     property var    _controller:        controller
+    readonly property var _importState: controller.parameterImportState
+    property var _importLifetime: ({ alive: true })
+
+    Component.onDestruction: _importLifetime.alive = false
+
+    function _importStateText(state) {
+        switch (state) {
+        case "queued": return qsTr("Queued")
+        case "sending": return qsTr("Sending")
+        case "waiting": return qsTr("Waiting for matching reports")
+        case "reports-matched": return qsTr("Matching reports observed (not an acknowledgement)")
+        case "cancelled": return qsTr("Remaining sends stopped")
+        case "source-retired": return qsTr("Stopped: original source changed")
+        case "timed-out": return qsTr("Timed out")
+        case "superseded": return qsTr("Stopped: parameters edited separately")
+        case "finished-with-unmatched-rows": return qsTr("Finished with unmatched or superseded rows")
+        case "failed": return qsTr("Stopped with an error")
+        default: return qsTr("No active import")
+        }
+    }
 
     property var    _parameterHelpFact: null
     property real   _parameterHelpX: 0
@@ -80,6 +100,20 @@ Item {
         if (!fact || _parameterHelpFact === fact) {
             _parameterHelpFact = null
         }
+    }
+
+    function _maintenanceVehicleAllowed(vehicle) {
+        return vehicle
+                && vehicle.initialConnectComplete
+                && vehicle.vehicleLinkManager
+                && !vehicle.vehicleLinkManager.communicationLost
+                && !vehicle.armed
+                && !vehicle.flying
+    }
+
+    function _showMaintenanceBlocked(reason) {
+        mainWindow.showMessageDialog(qsTr("Maintenance write blocked"),
+                                     reason || qsTr("Vehicle must be connected, link-ready, disarmed and on the ground."))
     }
 
     ParameterEditorController {
@@ -139,6 +173,92 @@ Item {
         }
     } // Row - Header
 
+    QGCFlickable {
+        id: importStatusArea
+        anchors.top: header.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        visible: !!_importState.runId
+        height: visible ? Math.min(importStatusContent.height, Math.max(0, _root.height * 0.35)) : 0
+        contentHeight: importStatusContent.height
+        contentWidth: width
+        flickableDirection: Flickable.VerticalFlick
+        clip: true
+
+        Column {
+            id: importStatusContent
+            width: parent.width
+            spacing: ScreenTools.defaultFontPixelHeight * 0.25
+
+            QGCLabel {
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: _importState.runId ? qsTr("Parameter import — %1\nRun: %2\nRows reaching the link writer: %3/%4; pending: %5; matching reports: %6; timed out: %7; superseded: %8.")
+                    .arg(_importStateText(_importState.state)).arg(_importState.runId)
+                    .arg(_importState.enteredRowCount).arg(_importState.rowCount)
+                    .arg(_importState.pendingCount).arg(_importState.matchingReportCount)
+                    .arg(_importState.timedOutCount).arg(_importState.supersededCount) : ""
+            }
+            QGCLabel {
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: qsTr("A matching report does not prove that this import caused it. Stopping cannot undo writes already submitted. Verify vehicle values before use.")
+            }
+            QGCLabel {
+                width: parent.width
+                wrapMode: Text.Wrap
+                visible: !!_importState.reason
+                text: _importState.reason || ""
+            }
+            QGCButton {
+                id: stopImportButton
+                width: parent.width
+                implicitHeight: Math.max(ScreenTools.implicitButtonHeight, contentItem.implicitHeight + topPadding + bottomPadding)
+                focusPolicy: Qt.StrongFocus
+                text: qsTr("Stop remaining import sends")
+                enabled: _importState.active === true
+                QGCPalette { id: importButtonPalette; colorGroupEnabled: stopImportButton.enabled }
+                contentItem: QGCLabel {
+                    text: stopImportButton.text
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    color: stopImportButton._showHighlight ? importButtonPalette.buttonHighlightText : importButtonPalette.buttonText
+                }
+                Rectangle {
+                    anchors.fill: parent
+                    color: "transparent"
+                    border.color: importButtonPalette.buttonText
+                    border.width: 2
+                    visible: stopImportButton.activeFocus
+                }
+                onActiveFocusChanged: {
+                    if (activeFocus) importStatusArea.contentY = Math.max(0, Math.min(y, importStatusArea.contentHeight - importStatusArea.height))
+                }
+                onClicked: {
+                    var lifetime = _importLifetime
+                    var originalController = controller
+                    var window = mainWindow
+                    var runId = _importState.runId
+                    if (!_importState.active || !runId) return
+                    var unavailableTitle = qsTr("Import state changed")
+                    var unavailableText = qsTr("The original import is no longer available. No later import was stopped.")
+                    window.showMessageDialog(qsTr("Stop parameter import"),
+                        qsTr("Stop remaining sends and retries for import %1? Parameters already sent are not rolled back.").arg(runId),
+                        StandardButton.Cancel | StandardButton.Ok,
+                        function() {
+                            if (!lifetime.alive || !window) return
+                            var stopped = originalController && originalController.cancelParameterImport(runId)
+                            if (lifetime.alive && window && !stopped) {
+                                window.showMessageDialog(unavailableTitle, unavailableText)
+                            }
+                        })
+                }
+            }
+        }
+    }
+
     QGCButton {
         anchors.top:    header.top
         anchors.bottom: header.bottom
@@ -156,23 +276,47 @@ Item {
         }
         QGCMenuItem {
             text:           qsTr("Reset all to firmware's defaults")
-            onTriggered:    mainWindow.showMessageDialog(qsTr("Reset All"),
-                                                         qsTr("Select Reset to reset all parameters to their defaults.\n\nNote that this will also completely reset everything, including UAVCAN nodes, all vehicle settings, setup and calibrations."),
-                                                         StandardButton.Cancel | StandardButton.Reset,
-                                                         function() { controller.resetAllToDefaults() })
+            onTriggered: {
+                if (!controller.writeAllowed()) {
+                    _showMaintenanceBlocked(controller.writeBlockReason())
+                    return
+                }
+                mainWindow.showMessageDialog(qsTr("Reset All"),
+                                             qsTr("Select Reset to reset all parameters to their defaults.\n\nNote that this will also completely reset everything, including UAVCAN nodes, all vehicle settings, setup and calibrations."),
+                                             StandardButton.Cancel | StandardButton.Reset,
+                                             function() {
+                                                 if (!controller.resetAllToDefaults()) {
+                                                     _showMaintenanceBlocked(controller.writeBlockReason())
+                                                 }
+                                             })
+            }
         }
         QGCMenuItem {
             text:           qsTr("Reset to vehicle's configuration defaults")
             visible:        !_activeVehicle.apmFirmware
-            onTriggered:    mainWindow.showMessageDialog(qsTr("Reset All"),
-                                                         qsTr("Select Reset to reset all parameters to the vehicle's configuration defaults."),
-                                                         StandardButton.Cancel | StandardButton.Reset,
-                                                         function() { controller.resetAllToVehicleConfiguration() })
+            onTriggered: {
+                if (!controller.writeAllowed()) {
+                    _showMaintenanceBlocked(controller.writeBlockReason())
+                    return
+                }
+                mainWindow.showMessageDialog(qsTr("Reset All"),
+                                             qsTr("Select Reset to reset all parameters to the vehicle's configuration defaults."),
+                                             StandardButton.Cancel | StandardButton.Reset,
+                                             function() {
+                                                 if (!controller.resetAllToVehicleConfiguration()) {
+                                                     _showMaintenanceBlocked(controller.writeBlockReason())
+                                                 }
+                                             })
+            }
         }
         QGCMenuSeparator { }
         QGCMenuItem {
             text:           qsTr("Load from file...")
             onTriggered: {
+                if (!controller.writeAllowed()) {
+                    _showMaintenanceBlocked(controller.writeBlockReason())
+                    return
+                }
                 fileDialog.title =          qsTr("Load Parameters")
                 fileDialog.selectExisting = true
                 fileDialog.openForLoad()
@@ -189,16 +333,38 @@ Item {
         QGCMenuSeparator { visible: _showRCToParam }
         QGCMenuItem {
             text:           qsTr("Clear all RC to Param")
-            onTriggered:	_activeVehicle.clearAllParamMapRC()
+            onTriggered: {
+                if (!_maintenanceVehicleAllowed(_activeVehicle)) {
+                    _showMaintenanceBlocked(qsTr("RC-to-parameter maintenance requires a connected, link-ready, disarmed vehicle on the ground."))
+                    return
+                }
+                _activeVehicle.clearAllParamMapRC()
+            }
             visible:        _showRCToParam
         }
         QGCMenuSeparator { }
         QGCMenuItem {
             text:           qsTr("Reboot Vehicle")
-            onTriggered:    mainWindow.showMessageDialog(qsTr("Reboot Vehicle"),
-                                                         qsTr("Select Ok to reboot vehicle."),
-                                                         StandardButton.Cancel | StandardButton.Ok,
-                                                         function() { _activeVehicle.rebootVehicle() })
+            onTriggered: {
+                var targetVehicle = _activeVehicle
+                var targetVehicleId = targetVehicle ? Number(targetVehicle.id) : -1
+                if (!_maintenanceVehicleAllowed(targetVehicle)) {
+                    _showMaintenanceBlocked(qsTr("Vehicle reboot requires a connected, link-ready, disarmed vehicle on the ground."))
+                    return
+                }
+                mainWindow.showMessageDialog(qsTr("Reboot Vehicle"),
+                                             qsTr("Select Ok to reboot vehicle."),
+                                             StandardButton.Cancel | StandardButton.Ok,
+                                             function() {
+                                                 if (!_maintenanceVehicleAllowed(targetVehicle)
+                                                         || _activeVehicle !== targetVehicle
+                                                         || Number(targetVehicle.id) !== targetVehicleId) {
+                                                     _showMaintenanceBlocked(qsTr("Vehicle reboot requires a connected, link-ready, disarmed vehicle on the ground."))
+                                                     return
+                                                 }
+                                                 targetVehicle.rebootVehicle()
+                                             })
+            }
         }
     }
 
@@ -206,7 +372,7 @@ Item {
     QGCFlickable {
         id :                groupScroll
         width:              ScreenTools.defaultFontPixelWidth * 25
-        anchors.top:        header.bottom
+        anchors.top:        importStatusArea.bottom
         anchors.bottom:     parent.bottom
         clip:               true
         pixelAligned:       true
@@ -271,7 +437,7 @@ Item {
         anchors.leftMargin: ScreenTools.defaultFontPixelWidth
         anchors.left:       _searchFilter ? parent.left : groupScroll.right
         anchors.right:      parent.right
-        anchors.top:        header.bottom
+        anchors.top:        importStatusArea.bottom
         anchors.bottom:     parent.bottom
         orientation:        ListView.Vertical
         model:              controller.parameters
@@ -392,9 +558,29 @@ Item {
         }
 
         onAcceptedForLoad: {
+            var lifetime = _importLifetime
+            var originalController = controller
+            var originalComponent = parameterDiffDialog
+            var window = mainWindow
+            var selectedFile = file
+            var failureTitle = qsTr("Parameter import blocked")
+            var failureText = qsTr("The parameter file could not be loaded. Check the file and reload it for the current vehicle.")
             close()
-            if (controller.buildDiffFromFile(file)) {
-                parameterDiffDialog.createObject(mainWindow).open()
+            if (!lifetime.alive || !originalController || !window) return
+            var loaded = originalController.buildDiffFromFile(selectedFile)
+            if (!lifetime.alive || !originalController || !window) return
+            if (loaded) {
+                var token = originalController.diffToken
+                if (!token || !originalComponent) return
+                var dialog = originalComponent.createObject(window, { "paramController": originalController, "previewToken": token })
+                if (!lifetime.alive || !originalController || originalController.diffToken !== token) {
+                    if (dialog) dialog.destroy()
+                    return
+                }
+                if (dialog) dialog.open()
+                else if (window) window.showMessageDialog(failureTitle, failureText)
+            } else {
+                window.showMessageDialog(failureTitle, originalController.diffError || failureText)
             }
         }
     }

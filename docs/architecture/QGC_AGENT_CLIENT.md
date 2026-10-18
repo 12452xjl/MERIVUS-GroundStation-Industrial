@@ -11,7 +11,7 @@
 - 在 `feat/qgc-agent-client` 阶段，Agent 仍需要开发者手动启动，不使用 `QProcess`。
 - 在 `feat/agent-supervisor` 阶段，`AiServiceSupervisor` 使用普通 `QProcess` 管理本机 Agent 生命周期；`AiAgentClient` 仍只负责 HTTP 通信。
 - 不连接真实模型、云端服务、MCP、MAVLink、PX4 或真实无人机。
-- `proposal` 只显示为未执行建议，不转换为飞行动作。
+- `proposal` 只显示为未执行建议，不转换为飞行动作。操作员可显式将可审阅的 `vehicle.*`/`mission.*` proposal 送入 Fleet OS 只读审阅草稿，仍不会批准、上传或下发命令。
 
 ## 接口
 
@@ -92,7 +92,7 @@ AI 面板通过 `AiServiceSupervisor` 和 `AiAgentClient` 显示：
 - Supervisor 只关闭自己启动的 Agent；如果 `ownsProcess=false`，不关闭外部手动 Agent。
 - 不接真实模型或 API Key。
 - 不执行 MAVLink、Vehicle、Swarm 或 PX4 动作。
-- `proposal` 只显示为“未执行建议”。
+- `proposal` 只显示为“未执行建议”；可由操作员显式送入 Fleet OS 只读审阅草稿，但仍不转换为 Vehicle、MAVLink、Swarm 或 PX4 操作。
 - 原生 QGC 手动飞控、地图和 Link 功能不因 Agent 离线而阻塞。
 
 ## 下一阶段
