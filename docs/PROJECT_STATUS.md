@@ -1,5 +1,9 @@
 # 项目状态
 
+## 2026-10-18 组织仓库审阅分支
+
+完整本地交付与 `Merivus-Industrial/MERIVUS-GroundStation` 的 `ffe42d8` 主分支已在独立发布工作区整合，准备提交中文 PR，等待人工审阅；没有合并主分支。当前整合版本未编译、测试或仿真，下面保留的旧 FTC 构建/链路结果不是对本次整合的验证。参见[本次整合记录](handoff/MERIVUS_INDUSTRIAL_SOURCE_SUBMISSION_20261018.md)。
+
 ## 546 当前：本地源码最终交接收口
 
 用户已明确最终范围为“本地地面站源码＋交接文档，外部未完成项单列”。最后五条本地操作链已接线：规则待审、Run后台检查点、用户模板、显式日志留存、四受众审阅报告；作者与非作者限定静读及本轮文本/路径核对已完成。本地交接内容收口，统一使用最终完整源码包，不再另发阶段包。
@@ -1687,6 +1691,9 @@ assignment 角色也已对齐角色分配器：只接受真实字符串 `leader/
 配置清除入口拒绝与新 configuration/fingerprint 同时出现的矛盾更新；能力发现和 Registry 对 null fault age 按未知处理，避免 QVariant 隐式转换伪造故障新鲜度。
 
 多机标准任务启动不再复用当前活动机的任务项数量/当前索引；多机确认快照按每架机的 MissionManager 指纹复核，避免异构任务被单机 UI 快照误拦截。单机启动仍保留数量、当前索引和指纹三重一致性检查。
+## 目标仓库保留的 FTC 历史验证记录（本次未复跑）
+
+更新：2026-09-17。最终分支 `codex/ftc-full-validation`，收口前源码提交 `e7444f32b2f81c699e8b881a1262ca8f1945f5ee`。
 
 FTC 已同步 v2 extensions，typed backend 区分模型无效和消息过期，主 H/E 不显示无效历史估计。主界面保持简洁，估计内部诊断放在详情；ACTIVE 仅根据固件实际反馈显示。参见 [协议契约](architecture/FTC_TELEMETRY_CONTRACT.md)。
 

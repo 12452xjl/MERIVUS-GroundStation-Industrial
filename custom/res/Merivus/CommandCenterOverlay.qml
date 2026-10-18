@@ -7,6 +7,7 @@ import QGroundControl.FlightDisplay 1.0
 import QGroundControl.FlightMap     1.0
 import QGroundControl.Palette       1.0
 import QGroundControl.ScreenTools   1.0
+import Merivus                      1.0
 
 Item {
     id: root
@@ -18,6 +19,9 @@ Item {
     property var selectedIds: []
     property var vehicles: QGroundControl.multiVehicleManager.vehicles
     property var activeVehicle: QGroundControl.multiVehicleManager.activeVehicle
+    property var mapControl
+    property var reviewController
+    property bool selfieSettingsOpen: false
     property var toolInsets
     property alias videoDockTarget: videoViewport
 
@@ -124,7 +128,60 @@ Item {
 
     QGCPalette { id: qgcPal; colorGroupEnabled: true }
     FtcStatusPalette { id: ftcStatusPalette }
+    ReviewVideoController {
+        id: reviewVideoController
+        vehicle: root.focusVehicle
+        active: root.reviewController && root.reviewController.inspecting
+    }
     Timer { interval: 1000; running: root.visible; repeat: true; onTriggered: root.now = new Date() }
+
+    Column {
+        anchors.top: parent.top
+        anchors.topMargin: root.topInset
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: Math.min(360, root.width * 0.32)
+        spacing: 5
+        z: QGroundControl.zOrderTopMost + 1
+
+        QGCButton {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: root.reviewController && root.reviewController.inspecting ? tr("退出检视") : tr("检视动力范围")
+            primary: root.reviewController && root.reviewController.inspecting
+            onClicked: {
+                if (!root.reviewController) return
+                if (root.reviewController.inspecting) {
+                    root.reviewController.stopInspection()
+                } else {
+                    root.reviewController.startInspection()
+                    if (root.reviewController.inspecting && root.mapControl)
+                        root.mapControl.center = root.reviewController.anchor
+                }
+            }
+        }
+
+        Rectangle {
+            width: parent.width
+            height: reviewStatus.implicitHeight + 12
+            radius: 6
+            color: root.panelColor
+            border.color: root.panelLine
+            visible: root.reviewController && root.reviewController.statusText.length > 0
+
+            QGCLabel {
+                id: reviewStatus
+                anchors.centerIn: parent
+                width: parent.width - 16
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+                color: qgcPal.text
+                text: !root.reviewController ? "" :
+                      (root.reviewController.rangeAvailable
+                       ? tr("UAV-%1 · 试算半径约 %2 m · %3").arg(root.focusVehicle ? root.focusVehicle.id : "--")
+                            .arg(Math.floor(root.reviewController.radiusMeters)).arg(root.reviewController.statusText)
+                       : root.reviewController.statusText)
+            }
+        }
+    }
 
     function tr(text) { return qsTr(text) }
     function clamp(value, minValue, maxValue) { return Math.max(minValue, Math.min(maxValue, value)) }
@@ -2106,10 +2163,64 @@ function escFact(vehicle, prefix, motorIndex) {
 
                     Rectangle {
                         anchors.fill: videoViewport
+                        color: "black"
+                        clip: true
+                        visible: root.reviewController && root.reviewController.inspecting
+                        z: 3
+
+                        Loader {
+                            anchors.fill: parent
+                            active: parent.visible && reviewVideoController.rtspUrl.length > 0
+                            sourceComponent: QGCVideoBackground {
+                                id: selfieVideoFrame
+                                anchors.fill: parent
+                                Component.onCompleted: reviewVideoController.videoItem = selfieVideoFrame
+                                Component.onDestruction: reviewVideoController.videoItem = null
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.left: videoViewport.left
+                        anchors.right: videoViewport.right
+                        anchors.top: videoViewport.top
+                        height: osdText.implicitHeight + 10
+                        color: "#b0000000"
+                        visible: root.reviewController && root.reviewController.inspecting
+                        z: 4
+
+                        QGCLabel {
+                            id: osdText
+                            anchors.centerIn: parent
+                            width: parent.width - 12
+                            color: "white"
+                            font.pointSize: root.fontPointSize(10)
+                            elide: Text.ElideRight
+                            text: tr("UAV-%1  高度 %2  地速 %3  电量 %4").arg(root.focusVehicle ? root.focusVehicle.id : "--")
+                                  .arg(root.focusVehicle ? root.numberText(root.focusVehicle.altitudeRelative, 0, "m") : "--")
+                                  .arg(root.focusVehicle ? root.numberText(root.focusVehicle.groundSpeed, 1, "m/s") : "--")
+                                  .arg(root.batteryPercent(root.focusVehicle))
+                        }
+                    }
+
+                    QGCLabel {
+                        anchors.centerIn: videoViewport
+                        width: videoViewport.width - 20
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.WordWrap
+                        text: reviewVideoController.statusText
+                        color: "white"
+                        visible: root.reviewController && root.reviewController.inspecting
+                                 && !reviewVideoController.decoding
+                        z: 4
+                    }
+
+                    Rectangle {
+                        anchors.fill: videoViewport
                         radius: 6
                         color: "transparent"
                         border.color: root.mutedLine
-                        z: 2
+                        z: 5
                     }
 
                     Column {
@@ -2132,13 +2243,46 @@ function escFact(vehicle, prefix, motorIndex) {
                         color: QGroundControl.videoManager.recording ? qgcPal.colorRed :
                                (QGroundControl.videoManager.decoding ? root.nominal : root.muted)
                         font.pointSize: root.fontPointSize(10)
+                        visible: !root.reviewController || !root.reviewController.inspecting
                         z: 3
                     }
                 }
 
                 RowLayout {
                     Layout.fillWidth: true
+
+                    QGCButton {
+                        text: root.selfieSettingsOpen ? tr("收起自拍杆设置") : tr("设置自拍杆 RTSP")
+                        enabled: !!root.focusVehicle
+                        onClicked: root.selfieSettingsOpen = !root.selfieSettingsOpen
+                    }
+                    QGCLabel {
+                        Layout.fillWidth: true
+                        horizontalAlignment: Text.AlignRight
+                        text: reviewVideoController.decoding ? tr("自拍杆直播中") :
+                              (reviewVideoController.rtspUrl.length > 0 ? tr("已配置自拍杆流") : tr("未配置自拍杆流"))
+                        color: reviewVideoController.decoding ? root.nominal : root.muted
+                    }
+                }
+
+                QGCTextField {
+                    id: selfieRtspField
+                    Layout.fillWidth: true
+                    visible: root.selfieSettingsOpen
+                    placeholderText: "rtsp://host:port/path"
+                    Component.onCompleted: text = reviewVideoController.rtspUrl
+                    onEditingFinished: reviewVideoController.rtspUrl = text
+                }
+
+                Connections {
+                    target: reviewVideoController
+                    function onRtspUrlChanged() { selfieRtspField.text = reviewVideoController.rtspUrl }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
                     spacing: 6
+                    visible: !root.reviewController || !root.reviewController.inspecting
 
                     QGCButton {
                         id: videoRecordButton

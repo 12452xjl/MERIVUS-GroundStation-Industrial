@@ -1638,6 +1638,10 @@ Session两个认证入口现共用单进程GUI提示栈锁，从任何OS/identit
 
 - [ADR-0001：植保区域覆盖飞行初版方案（待实现与验证）](adr/0001-plant-protection-area-coverage.md)
 
+## 设计决策
+
+- [ADR-0001：植保区域覆盖飞行初版方案（待实现与验证）](adr/0001-plant-protection-area-coverage.md)
+
 ## 开发与验证
 
 - [构建与生成入口](development/BUILD.md)
