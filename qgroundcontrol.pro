@@ -657,6 +657,7 @@ HEADERS += \
     src/QGCComboBox.h \
     src/QGCConfig.h \
     src/QGCFileDownload.h \
+    src/QGCOwnedDownloadFile.h \
     src/QGCLoggingCategory.h \
     src/QGCMapPalette.h \
     src/QGCPalette.h \
@@ -716,7 +717,12 @@ HEADERS += \
     src/Vehicle/CompInfoGeneral.h \
     src/Vehicle/ComponentInformationCache.h \
     src/Vehicle/ComponentInformationManager.h \
+    src/Vehicle/ComponentMetadataArtifactWorker.h \
+    src/Vehicle/ComponentMetadataWorkScheduler.h \
+    src/Vehicle/ComponentParameterMetadata.h \
     src/Vehicle/ComponentInformationTranslation.h \
+    src/Vehicle/ComponentTranslationEngine.h \
+    src/Vehicle/ComponentMetadataTranslationWorker.h \
     src/Vehicle/EventHandler.h \
     src/Vehicle/FTPManager.h \
     src/Vehicle/GPSRTKFactGroup.h \
@@ -733,6 +739,12 @@ HEADERS += \
     src/Vehicle/TerrainFactGroup.h \
     src/Vehicle/TerrainProtocolHandler.h \
     src/Vehicle/TrajectoryPoints.h \
+    src/Vehicle/FleetStartupOdometry.h \
+    src/Vehicle/FleetStartupGlobalOrigin.h \
+    src/Vehicle/FleetStartupAltitude.h \
+    src/Vehicle/FleetStartupMemorySeal.h \
+    src/Vehicle/VehicleTelemetryObserver.h \
+    src/Vehicle/VehicleMissionExecutionObserver.h \
     src/Vehicle/Vehicle.h \
     src/Vehicle/VehicleObjectAvoidance.h \
     src/Vehicle/VehicleBatteryFactGroup.h \
@@ -915,6 +927,7 @@ SOURCES += \
     src/QGCCachedFileDownload.cc \
     src/QGCComboBox.cc \
     src/QGCFileDownload.cc \
+    src/QGCOwnedDownloadFile.cc \
     src/QGCLoggingCategory.cc \
     src/QGCMapPalette.cc \
     src/QGCPalette.cc \
@@ -974,7 +987,12 @@ SOURCES += \
     src/Vehicle/CompInfoGeneral.cc \
     src/Vehicle/ComponentInformationCache.cc \
     src/Vehicle/ComponentInformationManager.cc \
+    src/Vehicle/ComponentMetadataArtifactWorker.cc \
+    src/Vehicle/ComponentMetadataWorkScheduler.cc \
+    src/Vehicle/ComponentParameterMetadata.cc \
     src/Vehicle/ComponentInformationTranslation.cc \
+    src/Vehicle/ComponentTranslationEngine.cc \
+    src/Vehicle/ComponentMetadataTranslationWorker.cc \
     src/Vehicle/EventHandler.cc \
     src/Vehicle/FTPManager.cc \
     src/Vehicle/GPSRTKFactGroup.cc \
@@ -991,6 +1009,10 @@ SOURCES += \
     src/Vehicle/TerrainFactGroup.cc \
     src/Vehicle/TerrainProtocolHandler.cc \
     src/Vehicle/TrajectoryPoints.cc \
+    src/Vehicle/FleetStartupOdometry.cc \
+    src/Vehicle/FleetStartupGlobalOrigin.cc \
+    src/Vehicle/FleetStartupAltitude.cc \
+    src/Vehicle/FleetStartupMemorySeal.cc \
     src/Vehicle/Vehicle.cc \
     src/Vehicle/VehicleObjectAvoidance.cc \
     src/Vehicle/VehicleBatteryFactGroup.cc \
@@ -1135,6 +1157,9 @@ ArdupilotEnabled {
 # ArduPilot FirmwarePlugin
 
 APMFirmwarePlugin {
+    # Native configuration tail checks may inspect only the compiled-in APM
+    # implementation, never a guessed plugin layout in a stripped build.
+    DEFINES += MERIVUS_HAS_APM_CONFIGURATION_OBSERVATION
     RESOURCES *= src/FirmwarePlugin/APM/APMResources.qrc
 
     INCLUDEPATH += \
@@ -1273,6 +1298,8 @@ HEADERS += \
     src/FactSystem/FactMetaData.h \
     src/FactSystem/FactSystem.h \
     src/FactSystem/FactValueSliderListModel.h \
+    src/FactSystem/OfflineParameterFile.h \
+    src/FactSystem/ParameterCacheFile.h \
     src/FactSystem/ParameterManager.h \
     src/FactSystem/SettingsFact.h \
 
@@ -1283,6 +1310,8 @@ SOURCES += \
     src/FactSystem/FactMetaData.cc \
     src/FactSystem/FactSystem.cc \
     src/FactSystem/FactValueSliderListModel.cc \
+    src/FactSystem/OfflineParameterFile.cc \
+    src/FactSystem/ParameterCacheFile.cc \
     src/FactSystem/ParameterManager.cc \
     src/FactSystem/SettingsFact.cc \
 

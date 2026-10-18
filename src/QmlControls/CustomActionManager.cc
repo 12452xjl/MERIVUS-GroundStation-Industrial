@@ -8,6 +8,7 @@
  ****************************************************************************/
 
 #include <QQmlEngine>
+#include <cmath>
 
 #include "CustomActionManager.h"
 #include "CustomAction.h"
@@ -75,15 +76,40 @@ void CustomActionManager::_loadFromJson(QVariant fact) {
             { "param5", QJsonValue::Double, /* required= */ false },
             { "param6", QJsonValue::Double, /* required= */ false },
             { "param7", QJsonValue::Double, /* required= */ false },
+            { "safetyClass", QJsonValue::String, /* required= */ false },
         };
         if (!JsonHelper::validateKeys(actionObj, actionKeyInfoList, errorString)) {
             qCWarning(GuidedActionsControllerLog) << "Custom Actions JSON document incorrect format:" << errorString;
             continue;
         }
 
+        const int mavCmdValue = actionObj["mavCmd"].toInt(-1);
+        const int compIdValue = actionObj["compId"].toInt(MAV_COMP_ID_AUTOPILOT1);
+        if (mavCmdValue <= 0 || mavCmdValue > 65535 || compIdValue <= 0 || compIdValue > 255) {
+            qCWarning(GuidedActionsControllerLog) << "Custom action rejected invalid command/component" << mavCmdValue << compIdValue;
+            continue;
+        }
+
+        const QJsonValue paramValues[] = {
+            actionObj["param1"], actionObj["param2"], actionObj["param3"],
+            actionObj["param4"], actionObj["param5"], actionObj["param6"],
+            actionObj["param7"]
+        };
+        bool finiteParams = true;
+        for (const QJsonValue& paramValue : paramValues) {
+            if (!paramValue.isUndefined() && !std::isfinite(paramValue.toDouble())) {
+                finiteParams = false;
+                break;
+            }
+        }
+        if (!finiteParams) {
+            qCWarning(GuidedActionsControllerLog) << "Custom action rejected non-finite parameter";
+            continue;
+        }
+
         auto label = actionObj["label"].toString();
-        auto mavCmd = (MAV_CMD)actionObj["mavCmd"].toInt();
-        auto compId = (MAV_COMPONENT)actionObj["compId"].toInt(MAV_COMP_ID_AUTOPILOT1);
+        auto mavCmd = (MAV_CMD)mavCmdValue;
+        auto compId = (MAV_COMPONENT)compIdValue;
         auto param1 = actionObj["param1"].toDouble(0.0);
         auto param2 = actionObj["param2"].toDouble(0.0);
         auto param3 = actionObj["param3"].toDouble(0.0);
@@ -91,8 +117,9 @@ void CustomActionManager::_loadFromJson(QVariant fact) {
         auto param5 = actionObj["param5"].toDouble(0.0);
         auto param6 = actionObj["param6"].toDouble(0.0);
         auto param7 = actionObj["param7"].toDouble(0.0);
+        auto safetyClass = actionObj["safetyClass"].toString();
 
-        CustomAction* action = new CustomAction(label, mavCmd, compId, param1, param2, param3, param4, param5, param6, param7);
+        CustomAction* action = new CustomAction(label, mavCmd, compId, param1, param2, param3, param4, param5, param6, param7, safetyClass);
         QQmlEngine::setObjectOwnership(action, QQmlEngine::CppOwnership);
         _actions.append(action);
     }

@@ -10,9 +10,23 @@
 #include "MAVLinkStreamConfig.h"
 #include "QGCMAVLink.h"
 
+#include <limits>
+
+namespace {
+constexpr int MaximumCallbacksPerPump = 64;
+}
+
 MAVLinkStreamConfig::MAVLinkStreamConfig(const SetMessageIntervalCb &messageIntervalCb)
-    : _messageIntervalCb(messageIntervalCb)
+    : _lifetime(std::make_shared<char>(0))
+    , _messageIntervalCb(messageIntervalCb)
 {
+}
+
+MAVLinkStreamConfig::~MAVLinkStreamConfig()
+{
+    // Invalidate an active callback's local weak token before destroying any
+    // containers or the original std::function member.
+    _lifetime.reset();
 }
 
 void MAVLinkStreamConfig::setHighRateRateAndAttitude()
@@ -49,18 +63,15 @@ void MAVLinkStreamConfig::setHighRateAltAirspeed()
     setNextState(State::Configuring);
 }
 
-void MAVLinkStreamConfig::gotSetMessageIntervalAck()
+bool MAVLinkStreamConfig::gotSetMessageIntervalResult(RequestId requestId, bool accepted)
 {
-    switch (_state) {
-        case State::Configuring:
-            nextDesiredRate();
-            break;
-        case State::RestoringDefaults:
-            restoreNextDefault();
-            break;
-        default:
-            break;
-    }
+    if (requestId == 0 || requestId != _pending.requestId || _pending.resultReady) return false;
+    _pending.resultReady = true;
+    _pending.accepted = accepted;
+    // A synchronous result only records the outcome while pump() is active.
+    // Its outer loop advances iteratively, never through recursive callbacks.
+    pump();
+    return true;
 }
 
 void MAVLinkStreamConfig::setNextState(State state)
@@ -69,27 +80,23 @@ void MAVLinkStreamConfig::setNextState(State state)
     if (_state == State::Idle) {
         // first restore defaults no matter what the next state is
         _state = State::RestoringDefaults;
-        restoreNextDefault();
     }
+    pump();
 }
 
-void MAVLinkStreamConfig::nextDesiredRate()
+void MAVLinkStreamConfig::stopAfterFailure(const PendingRequest& request)
 {
-    if (_nextState != State::Idle) { // allow state to be interrupted by a new request
-        _desiredRates.clear();
-        _state = State::RestoringDefaults;
-        restoreNextDefault();
-        return;
+    // A failed restore may still have reached the aircraft. Keep it among the
+    // possibly changed IDs, but do not retry or continue a queued configuration
+    // automatically after this ambiguous/negative terminal result.
+    if (request.restoring && !_changedIds.contains(request.messageId)) {
+        _changedIds.push_back(request.messageId);
     }
-
-    if (_desiredRates.empty()) {
-        _state = State::Idle;
-        return;
-    }
-    const DesiredStreamRate& rate = _desiredRates.last();
-    _changedIds.push_back(rate.messageId);
-    _messageIntervalCb(rate.messageId, rate.rate);
-    _desiredRates.pop_back();
+    _pending = PendingRequest();
+    _desiredRates.clear();
+    _nextDesiredRates.clear();
+    _nextState = State::Idle;
+    _state = State::Idle;
 }
 
 void MAVLinkStreamConfig::restoreDefaults()
@@ -97,28 +104,94 @@ void MAVLinkStreamConfig::restoreDefaults()
     setNextState(State::RestoringDefaults);
 }
 
-void MAVLinkStreamConfig::restoreNextDefault()
+void MAVLinkStreamConfig::pump()
 {
-    if (_changedIds.empty()) {
-        // do we have a pending request?
-        switch (_nextState) {
-            case State::Configuring:
-                _state = _nextState;
-                _desiredRates = _nextDesiredRates;
-                _nextDesiredRates.clear();
-                _nextState = State::Idle;
-                nextDesiredRate();
-                break;
-            case State::RestoringDefaults:
-            case State::Idle:
-                _nextState = State::Idle; // nothing to do, we just finished restoring
-                _state = State::Idle;
-                break;
+    if (_pumping) return;
+    _pumping = true;
+    int callbacksIssued = 0;
+    for (;;) {
+        if (_pending.requestId != 0) {
+            if (!_pending.resultReady) {
+                _pumping = false;
+                return;
+            }
+            const PendingRequest completed = _pending;
+            _pending = PendingRequest();
+            if (!completed.accepted) {
+                stopAfterFailure(completed);
+                _pumping = false;
+                return;
+            }
         }
-        return;
-    }
 
-    int id = _changedIds.last();
-    _messageIntervalCb(id, 0); // restore the default rate
-    _changedIds.pop_back();
+        if (_state == State::Configuring && _nextState != State::Idle) {
+            // An explicitly selected newer profile first restores every
+            // possibly changed message from the prior profile.
+            _desiredRates.clear();
+            _state = State::RestoringDefaults;
+        }
+
+        PendingRequest request;
+        if (_state == State::RestoringDefaults) {
+            if (_changedIds.empty()) {
+                if (_nextState == State::Configuring) {
+                    _desiredRates = _nextDesiredRates;
+                    _nextDesiredRates.clear();
+                    _nextState = State::Idle;
+                    _state = State::Configuring;
+                    continue;
+                }
+                _nextState = State::Idle;
+                _state = State::Idle;
+                _pumping = false;
+                return;
+            }
+            request.messageId = _changedIds.takeLast();
+            request.rate = 0; // Firmware default; NOT the previously observed rate.
+            request.restoring = true;
+        } else if (_state == State::Configuring) {
+            if (_desiredRates.empty()) {
+                _state = State::Idle;
+                _pumping = false;
+                return;
+            }
+            // Own and remove the row BEFORE invoking any external callback.
+            const DesiredStreamRate rate = _desiredRates.takeLast();
+            request.messageId = rate.messageId;
+            request.rate = rate.rate;
+        } else {
+            _pumping = false;
+            return;
+        }
+
+        if (callbacksIssued >= MaximumCallbacksPerPump
+            || _lastRequestId == std::numeric_limits<RequestId>::max() || !_messageIntervalCb) {
+            // A reentrant callback can continually select a newer profile.
+            // Bound this one synchronous pump instead of looping forever or
+            // silently scheduling an automatic continuation. A popped restore
+            // is put back by the same conservative failure path.
+            stopAfterFailure(request);
+            _pumping = false;
+            return;
+        }
+        request.requestId = ++_lastRequestId;
+        if (!request.restoring && !_changedIds.contains(request.messageId)) {
+            // Even a rejected/timeout result cannot prove that no change was
+            // made on board, so retain this ID until a successful restore.
+            _changedIds.push_back(request.messageId);
+        }
+        _pending = request;
+        const std::weak_ptr<char> lifetime = _lifetime;
+        {
+            const SetMessageIntervalCb callback = _messageIntervalCb;
+            if (lifetime.expired()) return;
+            ++callbacksIssued;
+            callback(request.requestId, request.messageId, request.rate);
+        }
+        // The local callback's destruction is also before this last fence.
+        if (lifetime.expired()) return;
+        // Do not hold a QVector element/reference or a flag rollback guard
+        // across callback(). If the result was synchronous, the next loop
+        // consumes it; otherwise the pending request stops this pump.
+    }
 }

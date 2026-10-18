@@ -1,0 +1,9 @@
+# Episode 524：实际旧部署归档退休证据
+
+`retirementEvidence(actualSwarm, actualOrchestrator, published)` 是仅供实际Lifecycle使用的private原生查询，不是QML动作、许可或正式飞行结果。它保留原 `switchEvidence` 的18键outbound quiet快照及所有原来源门，并逐个枚举本Series真实1–9事务，而非仅最后consumer。
+
+已发布组要求本实际 `_publishedForOutbound && _supersededForOutbound`；未发布组要求完整 `freshForPublication`，不能把普通失败、缺失或空map解释为idle。真实Run均须prepared、retired、不polling/liveProbe/ownerDestroying，同原Txn/Swarm/Orchestrator；每个事务还须原独立观察Close提交sticky事实。唯一例外是原 `_unissuedPreparationClosed`、逐Run目标从未queueBegan/queueCommitted及逐Txn目标MODE queued/uncertain全false。无taskId只在该严格例外下允许，仍保留原quiet Run行，不虚构TaskRecord或任务完成。
+
+快照中的全部reservation必须明确空；原helper会按target子集投影，因而额外在最后source probe后扫描Swarm整张实际owner表，该Episode的deployment/startup/Run等原owner在target外仍有占用也拒绝。不释放任何占用或删除未知owner。返回固定3键 `quietEvidence/records/retirementKind`，records为同序原protected record16、最多9，kind为closed-observations/unused-native/unpublished-pristine。closed-observations按实际quiet.runs非空判断，可有未注册TaskRecord的0report明确never-began Run。
+
+Lifecycle对worker写/readback后的完整原对象、后代、quiet与record再次尾核后才允许精确退休。父QObject的destroyed不代表所有后代已毁；原Episode和全部原后代QPointer均空的后续检查才释放槽。见[完整Lifecycle合同](FleetMissionDeploymentLifecycle.md)和[Orchestrator专用退休](SwarmMissionOrchestrator.md)。本批只有源码及限定静态审阅；未编译、测试、运行实现、操作PX4/硬件、刷机、放行、提交PR或打包，也不证明物理停飞或正式任务完成。

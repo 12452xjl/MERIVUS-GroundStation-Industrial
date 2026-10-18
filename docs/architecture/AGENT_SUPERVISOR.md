@@ -154,7 +154,7 @@ AI 面板实例化：
 
 只有 `healthReady=true` 后，QML 才允许发送聊天请求。Agent 离线、未安装、端口冲突、启动失败或崩溃时，界面显示清晰状态，地图、Link、Vehicle 和手动操作继续可用。
 
-`proposal` 仍只显示为“未执行建议”，不会转换为飞行动作。
+`proposal` 仍只显示为“未执行建议”，不会转换为飞行动作。对于通过本地策略校验的 `vehicle.*`/`mission.*` proposal，操作员可以在 AI 面板中显式点击“生成舰队审阅草稿”；该动作只调用 Fleet OS `prepareFleetIntent()` 做只读风险审阅，不请求批准、不上传任务、不释放命令。
 
 ## 失败降级
 

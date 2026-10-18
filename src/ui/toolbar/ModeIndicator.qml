@@ -33,7 +33,13 @@ QGCComboBox {
     property var _flightModes:      _activeVehicle ? _activeVehicle.flightModes : [ ]
 
     onActivated: {
-        _activeVehicle.flightMode = _flightModes[index]
+        var controller = typeof globals !== "undefined"
+                ? globals.guidedControllerFlyView : null
+        if (controller && typeof controller.requestFlightModeChange === "function") {
+            controller.requestFlightModeChange(_flightModes[index], _activeVehicle ? _activeVehicle.id : 0)
+        } else {
+            _activeVehicle.flightMode = _flightModes[index]
+        }
         currentIndex = -1
     }
 }

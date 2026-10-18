@@ -1,5 +1,8 @@
 #include "CommandTransaction.h"
 
+#include <cmath>
+#include <limits>
+#include <QPointer>
 #include <QUuid>
 
 namespace {
@@ -20,9 +23,14 @@ CommandTransaction::CommandTransaction(const QString& command,
     _timeoutTimer.setSingleShot(true);
     connect(&_timeoutTimer, &QTimer::timeout, this, &CommandTransaction::_handleTimeout);
 
+    // Preserve the original request for diagnostics, but never silently
+    // shrink a target set.  A malformed or duplicate protocol identity makes
+    // the whole transaction invalid; start() will fail before any dispatch.
+    _targetVehicleIds = targetVehicleIds;
     for (const QVariant& vehicleId : targetVehicleIds) {
         const QString key = _vehicleKey(vehicleId);
         if (key.isEmpty() || _vehicles.contains(key)) {
+            _targetInputValid = false;
             continue;
         }
         VehicleState vehicle;
@@ -30,7 +38,6 @@ CommandTransaction::CommandTransaction(const QString& command,
         vehicle.state = kPending;
         _vehicles.insert(key, vehicle);
         _vehicleOrder.append(key);
-        _targetVehicleIds.append(vehicleId);
     }
 }
 
@@ -57,7 +64,14 @@ bool CommandTransaction::isTerminal() const
 
 bool CommandTransaction::canRetry() const
 {
-    return isTerminal() && _retryCount < _maxRetries &&
+    // A validation failure before the first attempt (for example an empty
+    // command) is terminal, but it is not a retryable transport attempt.  Do
+    // not let beginRetry() turn that failed validation into a Running
+    // transaction with no command to send.
+    return _attempt > 0 && _attempt < std::numeric_limits<int>::max()
+           && _retryCount < std::numeric_limits<int>::max()
+           && !_command.isEmpty() && !_vehicleOrder.isEmpty()
+           && isTerminal() && _retryCount < _maxRetries &&
            (_countForState(kFailed) > 0 || _countForState(kTimedOut) > 0 || _countForState(kPending) > 0);
 }
 
@@ -68,7 +82,26 @@ void CommandTransaction::setTimeoutMs(int timeoutMs)
         return;
     }
     _timeoutMs = normalized;
+    const QPointer<CommandTransaction> self(this);
+    const int originalAttempt = _attempt;
+    const Status originalStatus = _status;
     emit timeoutMsChanged();
+    if (!self || _attempt != originalAttempt || _status != originalStatus
+        || _timeoutMs != normalized) return;
+    // Keep the QTimer and the exposed timeout property in sync when a policy
+    // changes during an active attempt. Otherwise the UI would display the
+    // new deadline while the old timer still fired in the background.
+    if (_status == Status::Running) {
+        if (_timeoutMs <= 0 || !_startedAt.isValid()) {
+            _stopTimer();
+        } else {
+            const qint64 elapsedMs = _startedAt.msecsTo(QDateTime::currentDateTimeUtc());
+            const int remainingMs = elapsedMs >= _timeoutMs
+                ? 1
+                : qMax(1, _timeoutMs - static_cast<int>(elapsedMs));
+            _timeoutTimer.start(remainingMs);
+        }
+    }
     emit resultChanged();
 }
 
@@ -79,44 +112,68 @@ void CommandTransaction::setMaxRetries(int maxRetries)
         return;
     }
     _maxRetries = normalized;
+    const QPointer<CommandTransaction> self(this);
     emit maxRetriesChanged();
+    if (!self) return;
     emit retryAvailableChanged();
+    if (!self) return;
     emit resultChanged();
 }
 
 bool CommandTransaction::start()
 {
-    if (_status != Status::Pending) {
+    if (_attemptTransitionActive || _status != Status::Pending) {
         return false;
     }
+    const QPointer<CommandTransaction> self(this);
     if (_command.isEmpty()) {
         _message = QStringLiteral("Command is empty");
         _finishedAt = QDateTime::currentDateTimeUtc();
         _setStatus(Status::Failed);
-        _emitResultChanges();
+        if (self) _emitResultChanges();
+        return false;
+    }
+    if (!_targetInputValid) {
+        _message = QStringLiteral("Target vehicle identity list is invalid or contains duplicates");
+        _finishedAt = QDateTime::currentDateTimeUtc();
+        _setStatus(Status::Failed);
+        if (self) _emitResultChanges();
         return false;
     }
     if (_vehicleOrder.isEmpty()) {
         _message = QStringLiteral("No target vehicles");
         _finishedAt = QDateTime::currentDateTimeUtc();
         _setStatus(Status::Failed);
-        _emitResultChanges();
+        if (self) _emitResultChanges();
         return false;
     }
 
-    _startedAt = QDateTime::currentDateTimeUtc();
+    _attemptTransitionActive = true;
     _startAttempt(false);
+    if (self) _attemptTransitionActive = false;
+    // Accepted local transition, not continued ownership or command success.
     return true;
 }
 
 bool CommandTransaction::beginRetry()
 {
-    if (!canRetry()) {
+    if (_attemptTransitionActive || !canRetry()) {
         return false;
     }
+    const QPointer<CommandTransaction> self(this);
+    const int originalAttempt = _attempt;
+    const Status originalStatus = _status;
+    _attemptTransitionActive = true;
     ++_retryCount;
     emit retryCountChanged();
+    if (!self) return true; // The accepted retry-count fact is not rolled back.
+    if (_attempt != originalAttempt || _status != originalStatus
+        || _retryCount > _maxRetries) {
+        _attemptTransitionActive = false;
+        return true;
+    }
     _startAttempt(true);
+    if (self) _attemptTransitionActive = false;
     return true;
 }
 
@@ -151,8 +208,10 @@ bool CommandTransaction::cancel(const QString& reason)
     _message = reason.trimmed().isEmpty() ? QStringLiteral("Cancelled") : reason.trimmed();
     _stopTimer();
     _finishedAt = QDateTime::currentDateTimeUtc();
+    const QPointer<CommandTransaction> self(this);
+    const int originalAttempt = _attempt;
     _setStatus(Status::Cancelled);
-    _emitResultChanges();
+    if (self && _attempt == originalAttempt && _status == Status::Cancelled) _emitResultChanges();
     return true;
 }
 
@@ -200,7 +259,16 @@ QString CommandTransaction::statusToString(Status status)
 
 void CommandTransaction::_handleTimeout()
 {
-    if (_status != Status::Running) {
+    // QTimer::stop()/start() can leave an already queued timeout callback in
+    // the event queue.  Re-check the current deadline here so a stale event
+    // cannot time out a transaction after the timeout policy was disabled or
+    // extended while the attempt was running.
+    if (_status != Status::Running || _timeoutMs <= 0 || !_startedAt.isValid()) {
+        return;
+    }
+    const qint64 elapsedMs = _startedAt.msecsTo(QDateTime::currentDateTimeUtc());
+    if (elapsedMs < _timeoutMs) {
+        _timeoutTimer.start(qMax<qint64>(1, _timeoutMs - elapsedMs));
         return;
     }
     for (const QString& key : _vehicleOrder) {
@@ -212,17 +280,28 @@ void CommandTransaction::_handleTimeout()
     }
     _message = QStringLiteral("Transaction timeout");
     _finishedAt = QDateTime::currentDateTimeUtc();
+    const QPointer<CommandTransaction> self(this);
+    const int originalAttempt = _attempt;
+    const int originalRetryCount = _retryCount;
     // Preserve a partial-success status when some vehicles completed before
     // the deadline. The per-vehicle timed_outIds still make the timeout
     // explicit to callers.
     _finishCurrentAttempt();
+    if (!self || _attempt != originalAttempt || _retryCount != originalRetryCount
+        || !isTerminal() || _status == Status::Cancelled) return;
+    const Status finishedStatus = _status;
     if (_status != Status::Succeeded) {
         _message = QStringLiteral("Transaction timeout");
         _emitResultChanges();
+        if (!self || _attempt != originalAttempt || _retryCount != originalRetryCount
+            || _status != finishedStatus) return;
     }
     emit timeoutReached();
+    if (!self || _attempt != originalAttempt || _retryCount != originalRetryCount
+        || _status != finishedStatus) return;
     if (canRetry()) {
-        emit retryRequested(_attempt + 1);
+        const int nextAttempt = originalAttempt + 1; // canRetry excludes INT_MAX.
+        emit retryRequested(nextAttempt);
     }
 }
 
@@ -231,7 +310,29 @@ QString CommandTransaction::_vehicleKey(const QVariant& vehicleId) const
     if (!vehicleId.isValid() || vehicleId.isNull()) {
         return QString();
     }
-    return vehicleId.toString().trimmed();
+
+    // Vehicle identity is a protocol address, not an arbitrary display
+    // string.  Keep the transaction key aligned with Registry/Health/mission
+    // identity rules so values such as "01", true, or "vehicle-1" cannot
+    // create an alias that later ACKs resolve to a different target.
+    bool numeric = false;
+    double value = 0.0;
+    switch (vehicleId.type()) {
+    case QVariant::Int:
+    case QVariant::UInt:
+    case QVariant::LongLong:
+    case QVariant::ULongLong:
+    case QVariant::Double:
+        value = vehicleId.toDouble(&numeric);
+        break;
+    default:
+        break;
+    }
+    if (!numeric || !std::isfinite(value) || std::floor(value) != value
+            || value < 1.0 || value > 255.0) {
+        return QString();
+    }
+    return QString::number(static_cast<int>(value));
 }
 
 bool CommandTransaction::_setVehicleState(const QVariant& vehicleId, const QString& state,
@@ -252,13 +353,22 @@ bool CommandTransaction::_setVehicleState(const QVariant& vehicleId, const QStri
     vehicle.state = state;
     vehicle.reason = reason.trimmed();
     vehicle.details = details;
+    const QPointer<CommandTransaction> self(this);
+    const int originalAttempt = _attempt;
     _emitResultChanges();
+    if (!self || _attempt != originalAttempt || _status != Status::Running) return true;
     _finishCurrentAttempt();
     return true;
 }
 
 void CommandTransaction::_startAttempt(bool resetRetryableVehicles)
 {
+    // A synchronous observer may cancel, finish, or destroy this attempt.
+    // The original stack must not resurrect it or arm a newer attempt's timer.
+    const QPointer<CommandTransaction> self(this);
+    const Status previousStatus = _status;
+    const int originalRetryCount = _retryCount;
+    if (_attempt == std::numeric_limits<int>::max()) return;
     if (resetRetryableVehicles) {
         for (const QString& key : _vehicleOrder) {
             VehicleState& vehicle = _vehicles[key];
@@ -269,12 +379,16 @@ void CommandTransaction::_startAttempt(bool resetRetryableVehicles)
             }
         }
     }
-    ++_attempt;
-    emit attemptChanged();
+    const int originalAttempt = ++_attempt;
     _startedAt = QDateTime::currentDateTimeUtc();
     _message.clear();
     _finishedAt = QDateTime();
+    emit attemptChanged();
+    if (!self || _attempt != originalAttempt || _retryCount != originalRetryCount
+        || _status != previousStatus) return;
     _setStatus(Status::Running);
+    if (!self || _attempt != originalAttempt || _retryCount != originalRetryCount
+        || _status != Status::Running) return;
     if (_timeoutMs > 0) {
         _timeoutTimer.start(_timeoutMs);
     }
@@ -298,19 +412,24 @@ void CommandTransaction::_finishCurrentAttempt()
     const int failures = _countForState(kFailed);
     const int timeouts = _countForState(kTimedOut);
     _finishedAt = QDateTime::currentDateTimeUtc();
+    Status finishedStatus;
     if (successes == _vehicleOrder.size()) {
         _message = QStringLiteral("All target vehicles succeeded");
-        _setStatus(Status::Succeeded);
+        finishedStatus = Status::Succeeded;
     } else if (successes > 0) {
         _message = QStringLiteral("Some target vehicles succeeded");
-        _setStatus(Status::PartiallySucceeded);
+        finishedStatus = Status::PartiallySucceeded;
     } else if (timeouts > 0 && failures == 0) {
         _message = QStringLiteral("All target vehicles timed out");
-        _setStatus(Status::TimedOut);
+        finishedStatus = Status::TimedOut;
     } else {
         _message = QStringLiteral("All target vehicles failed");
-        _setStatus(Status::Failed);
+        finishedStatus = Status::Failed;
     }
+    const QPointer<CommandTransaction> self(this);
+    const int originalAttempt = _attempt;
+    _setStatus(finishedStatus);
+    if (!self || _attempt != originalAttempt || _status != finishedStatus) return;
     _emitResultChanges();
 }
 
@@ -320,13 +439,20 @@ void CommandTransaction::_setStatus(Status status)
         return;
     }
     _status = status;
+    const QPointer<CommandTransaction> self(this);
+    const int originalAttempt = _attempt;
     emit statusChanged();
+    if (!self || _attempt != originalAttempt || _status != status) return;
     emit retryAvailableChanged();
 }
 
 void CommandTransaction::_emitResultChanges()
 {
+    const QPointer<CommandTransaction> self(this);
+    const int originalAttempt = _attempt;
+    const Status originalStatus = _status;
     emit progressChanged();
+    if (!self || _attempt != originalAttempt || _status != originalStatus) return;
     emit resultChanged();
 }
 
@@ -367,10 +493,19 @@ QVariantMap CommandTransaction::resultSummary() const
     summary.insert(QStringLiteral("transactionId"), _transactionId);
     summary.insert(QStringLiteral("command"), _command);
     summary.insert(QStringLiteral("status"), status());
+    // Keep the serialized transaction contract aligned with the Q_PROPERTY
+    // and with SwarmController's delayed-callback guards. Temporary Mission
+    // callbacks consume summaries after a transaction may have been archived;
+    // without this explicit field an archived failed/timeout transaction was
+    // indistinguishable from a still-running one and its onboard mission was
+    // not cleared deterministically.
+    summary.insert(QStringLiteral("terminal"), isTerminal());
     summary.insert(QStringLiteral("attempt"), _attempt);
     summary.insert(QStringLiteral("retryCount"), _retryCount);
     summary.insert(QStringLiteral("maxRetries"), _maxRetries);
     summary.insert(QStringLiteral("timeoutMs"), _timeoutMs);
+    summary.insert(QStringLiteral("targetInputValid"), _targetInputValid);
+    summary.insert(QStringLiteral("requestedTargetCount"), _targetVehicleIds.size());
     summary.insert(QStringLiteral("targetCount"), _vehicleOrder.size());
     summary.insert(QStringLiteral("successCount"), _countForState(kSucceeded));
     summary.insert(QStringLiteral("failedCount"), _countForState(kFailed));

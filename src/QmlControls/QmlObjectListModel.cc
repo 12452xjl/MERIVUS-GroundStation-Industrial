@@ -14,6 +14,7 @@
 #include "QmlObjectListModel.h"
 
 #include <QDebug>
+#include <QPointer>
 #include <QQmlEngine>
 
 const int QmlObjectListModel::ObjectRole = Qt::UserRole;
@@ -61,7 +62,8 @@ QVariant QmlObjectListModel::data(const QModelIndex &index, int role) const
     if (role == ObjectRole) {
         return QVariant::fromValue(_objectList[index.row()]);
     } else if (role == TextRole) {
-        return QVariant::fromValue(_objectList[index.row()]->objectName());
+        QObject* const object = _objectList.at(index.row());
+        return object ? QVariant::fromValue(object->objectName()) : QVariant();
     } else {
         return QVariant();
     }
@@ -91,38 +93,47 @@ bool QmlObjectListModel::setData(const QModelIndex& index, const QVariant& value
 bool QmlObjectListModel::insertRows(int position, int rows, const QModelIndex& parent)
 {
     Q_UNUSED(parent);
-    
-    if (position < 0 || position > _objectList.count() + 1) {
+
+    if (position < 0 || rows < 1 || position > _objectList.count() || rows > _objectList.count() - position) {
         qWarning() << "Invalid position position:count" << position << _objectList.count();
+        return false;
     }
-    
+
+    const QPointer<QmlObjectListModel> self(this);
+    // These notifications are synchronous lifetime boundaries. Callers own
+    // any operation/mutation fence; this does not change raw list ownership.
     beginInsertRows(QModelIndex(), position, position + rows - 1);
+    if (!self) return false;
     endInsertRows();
-    
+    if (!self) return false;
     emit countChanged(count());
-    
-    return true;
+
+    return bool(self);
 }
 
 bool QmlObjectListModel::removeRows(int position, int rows, const QModelIndex& parent)
 {
     Q_UNUSED(parent);
     
-    if (position < 0 || position >= _objectList.count()) {
+    if (position < 0 || rows < 1 || position >= _objectList.count()) {
         qWarning() << "Invalid position position:count" << position << _objectList.count();
-    } else if (position + rows > _objectList.count()) {
+        return false;
+    } else if (rows > _objectList.count() - position) {
         qWarning() << "Invalid rows position:rows:count" << position << rows << _objectList.count();
+        return false;
     }
-    
+
+    const QPointer<QmlObjectListModel> self(this);
     beginRemoveRows(QModelIndex(), position, position + rows - 1);
+    if (!self) return false;
     for (int row=0; row<rows; row++) {
         _objectList.removeAt(position);
     }
     endRemoveRows();
-    
+    if (!self) return false;
     emit countChanged(count());
-    
-    return true;
+
+    return bool(self);
 }
 
 void QmlObjectListModel::move(int from, int to)
@@ -135,9 +146,12 @@ void QmlObjectListModel::move(int from, int to)
         if(from == to - 1) {
             to = from++;
         }
-        beginMoveRows(QModelIndex(), from, from, QModelIndex(), to);
+        const QPointer<QmlObjectListModel> self(this);
+        const bool begun = beginMoveRows(QModelIndex(), from, from, QModelIndex(), to);
+        if (!self || !begun) return;
         _objectList.move(from, to);
         endMoveRows();
+        if (!self) return;
     }
 }
 
@@ -159,48 +173,67 @@ const QObject* QmlObjectListModel::operator[](int index) const
 
 void QmlObjectListModel::clear()
 {
-    if (!_externalBeginResetModel) {
+    const QPointer<QmlObjectListModel> self(this);
+    const bool externalReset = _externalBeginResetModel;
+    if (!externalReset) {
         beginResetModel();
+        if (!self) return;
     }
     _objectList.clear();
-    if (!_externalBeginResetModel) {
+    if (!externalReset) {
         endResetModel();
+        if (!self) return;
         emit countChanged(count());
     }
 }
 
 QObject* QmlObjectListModel::removeAt(int i)
 {
-    QObject* removedObject = _objectList[i];
+    if (i < 0 || i >= _objectList.count()) return nullptr;
+    const QPointer<QmlObjectListModel> self(this);
+    QObject* const original = _objectList.at(i);
+    const QPointer<QObject> removedObject(original);
     if(removedObject) {
         // Look for a dirtyChanged signal on the object
-        if (_objectList[i]->metaObject()->indexOfSignal(QMetaObject::normalizedSignature("dirtyChanged(bool)")) != -1) {
+        const bool hasDirtySignal = removedObject->metaObject()->indexOfSignal(QMetaObject::normalizedSignature("dirtyChanged(bool)")) != -1;
+        if (!self) return nullptr;
+        if (removedObject && hasDirtySignal) {
             if (!_skipDirtyFirstItem || i != 0) {
-                QObject::disconnect(_objectList[i], SIGNAL(dirtyChanged(bool)), this, SLOT(_childDirtyChanged(bool)));
+                QObject::disconnect(removedObject.data(), SIGNAL(dirtyChanged(bool)), this, SLOT(_childDirtyChanged(bool)));
+                if (!self) return nullptr;
             }
         }
     }
-    removeRows(i, 1);
+    if (i >= _objectList.count() || _objectList.at(i) != original || !removeRows(i, 1) || !self) return nullptr;
     setDirty(true);
-    return removedObject;
+    return self ? removedObject.data() : nullptr;
 }
 
 void QmlObjectListModel::insert(int i, QObject* object)
 {
     if (i < 0 || i > _objectList.count()) {
         qWarning() << "Invalid index index:count" << i << _objectList.count();
+        return;
     }
-    if(object) {
-        QQmlEngine::setObjectOwnership(object, QQmlEngine::CppOwnership);
+    const QPointer<QmlObjectListModel> self(this);
+    const QPointer<QObject> actualObject(object);
+    QMetaObject::Connection connection;
+    if(actualObject) {
+        QQmlEngine::setObjectOwnership(actualObject.data(), QQmlEngine::CppOwnership);
+        if (!self || !actualObject) return;
         // Look for a dirtyChanged signal on the object
-        if (object->metaObject()->indexOfSignal(QMetaObject::normalizedSignature("dirtyChanged(bool)")) != -1) {
+        const bool hasDirtySignal = actualObject->metaObject()->indexOfSignal(QMetaObject::normalizedSignature("dirtyChanged(bool)")) != -1;
+        if (!self || !actualObject) return;
+        if (hasDirtySignal) {
             if (!_skipDirtyFirstItem || i != 0) {
-                QObject::connect(object, SIGNAL(dirtyChanged(bool)), this, SLOT(_childDirtyChanged(bool)));
+                connection = QObject::connect(actualObject.data(), SIGNAL(dirtyChanged(bool)), this, SLOT(_childDirtyChanged(bool)));
+                if (!self || !actualObject) { QObject::disconnect(connection); return; }
             }
         }
     }
-    _objectList.insert(i, object);
-    insertRows(i, 1);
+    if (i > _objectList.count()) { QObject::disconnect(connection); return; }
+    _objectList.insert(i, actualObject.data());
+    if (!insertRows(i, 1) || !self) return;
     setDirty(true);
 }
 
@@ -208,25 +241,41 @@ void QmlObjectListModel::insert(int i, QList<QObject*> objects)
 {
     if (i < 0 || i > _objectList.count()) {
         qWarning() << "Invalid index index:count" << i << _objectList.count();
+        return;
     }
-
+    if (objects.isEmpty()) return;
+    const QPointer<QmlObjectListModel> self(this);
+    QList<QPointer<QObject>> actualObjects;
+    for (QObject* object : objects) actualObjects.append(QPointer<QObject>(object));
+    QList<QMetaObject::Connection> connections;
+    const auto discardConnections = [&connections]() {
+        for (const auto& connection : connections) QObject::disconnect(connection);
+    };
+    const auto inputsCurrent = [&]() {
+        if (!self) return false;
+        for (int index = 0; index < objects.size(); ++index)
+            if (objects.at(index) && !actualObjects.at(index)) return false;
+        return true;
+    };
     int j = i;
-    for (QObject* object: objects) {
-        QQmlEngine::setObjectOwnership(object, QQmlEngine::CppOwnership);
-
-        // Look for a dirtyChanged signal on the object
-        if (object->metaObject()->indexOfSignal(QMetaObject::normalizedSignature("dirtyChanged(bool)")) != -1) {
-            if (!_skipDirtyFirstItem || j != 0) {
-                QObject::connect(object, SIGNAL(dirtyChanged(bool)), this, SLOT(_childDirtyChanged(bool)));
+    for (const auto& object: actualObjects) {
+        if (object) {
+            QQmlEngine::setObjectOwnership(object.data(), QQmlEngine::CppOwnership);
+            if (!inputsCurrent()) { discardConnections(); return; }
+            // Prepare inputs before inserting any prefix or announcing rows.
+            const bool hasDirtySignal = object->metaObject()->indexOfSignal(QMetaObject::normalizedSignature("dirtyChanged(bool)")) != -1;
+            if (!inputsCurrent()) { discardConnections(); return; }
+            if (hasDirtySignal && (!_skipDirtyFirstItem || j != 0)) {
+                connections.append(QObject::connect(object.data(), SIGNAL(dirtyChanged(bool)), this, SLOT(_childDirtyChanged(bool))));
+                if (!inputsCurrent()) { discardConnections(); return; }
             }
         }
-
-        _objectList.insert(j, object);
         j++;
     }
-
-    insertRows(i, objects.count());
-
+    if (i > _objectList.count()) { discardConnections(); return; }
+    j = i;
+    for (const auto& object: actualObjects) _objectList.insert(j++, object.data());
+    if (!insertRows(i, objects.count()) || !self) return;
     setDirty(true);
 }
 
@@ -242,15 +291,25 @@ void QmlObjectListModel::append(QList<QObject*> objects)
 
 QObjectList QmlObjectListModel::swapObjectList(const QObjectList& newlist)
 {
-    QObjectList oldlist(_objectList);
-    if (!_externalBeginResetModel) {
+    const QPointer<QmlObjectListModel> self(this);
+    QList<QPointer<QObject>> oldObjects, newObjects;
+    for (QObject* object : _objectList) oldObjects.append(QPointer<QObject>(object));
+    for (QObject* object : newlist) newObjects.append(QPointer<QObject>(object));
+    const bool externalReset = _externalBeginResetModel;
+    if (!externalReset) {
         beginResetModel();
+        if (!self) return {};
     }
-    _objectList = newlist;
-    if (!_externalBeginResetModel) {
+    _objectList.clear();
+    for (const auto& object : newObjects) _objectList.append(object.data());
+    if (!externalReset) {
         endResetModel();
+        if (!self) return {};
         emit countChanged(count());
+        if (!self) return {};
     }
+    QObjectList oldlist;
+    for (const auto& object : oldObjects) oldlist.append(object.data());
     return oldlist;
 }
 
@@ -262,12 +321,19 @@ int QmlObjectListModel::count() const
 void QmlObjectListModel::setDirty(bool dirty)
 {
     if (_dirty != dirty) {
+        const QPointer<QmlObjectListModel> self(this);
         _dirty = dirty;
         if (!dirty) {
             // Need to clear dirty from all children
-            for(QObject* object: _objectList) {
-                if (object->property("dirty").isValid()) {
+            QList<QPointer<QObject>> objects;
+            for (QObject* object : _objectList) objects.append(QPointer<QObject>(object));
+            for(const auto& object: objects) {
+                if (!object) continue;
+                const bool hasDirtyProperty = object->property("dirty").isValid();
+                if (!self) return;
+                if (object && hasDirtyProperty) {
                     object->setProperty("dirty", false);
+                    if (!self) return;
                 }
             }
         }
@@ -285,36 +351,58 @@ void QmlObjectListModel::_childDirtyChanged(bool dirty)
 
 void QmlObjectListModel::deleteListAndContents()
 {
-    for (int i=0; i<_objectList.count(); i++) {
-        _objectList[i]->deleteLater();
+    const QPointer<QmlObjectListModel> self(this);
+    QList<QPointer<QObject>> objects;
+    for (QObject* object : _objectList) objects.append(QPointer<QObject>(object));
+    for (const auto& object : objects) {
+        if (object) object->deleteLater();
+        if (!self) return;
     }
     deleteLater();
 }
 
 void QmlObjectListModel::clearAndDeleteContents()
 {
-    beginResetModel();
-    for (int i=0; i<_objectList.count(); i++) {
-        _objectList[i]->deleteLater();
+    const QPointer<QmlObjectListModel> self(this);
+    QList<QPointer<QObject>> objects;
+    for (QObject* object : _objectList) objects.append(QPointer<QObject>(object));
+    const bool externalReset = _externalBeginResetModel;
+    if (!externalReset) {
+        beginResetModel();
+        if (!self) return;
     }
-    clear();
-    endResetModel();
+    _objectList.clear();
+    for (const auto& object : objects) {
+        if (object) object->deleteLater();
+        if (!self) return;
+    }
+    if (!externalReset) {
+        endResetModel();
+        if (!self) return;
+        emit countChanged(count());
+    }
 }
 
 void QmlObjectListModel::beginReset()
 {
     if (_externalBeginResetModel) {
         qWarning() << "QmlObjectListModel::beginReset already set";
+        return;
     }
+    const QPointer<QmlObjectListModel> self(this);
     _externalBeginResetModel = true;
     beginResetModel();
+    if (!self) return;
 }
 
 void QmlObjectListModel::endReset()
 {
     if (!_externalBeginResetModel) {
         qWarning() << "QmlObjectListModel::endReset begin not set";
+        return;
     }
+    const QPointer<QmlObjectListModel> self(this);
     _externalBeginResetModel = false;
     endResetModel();
+    if (!self) return;
 }

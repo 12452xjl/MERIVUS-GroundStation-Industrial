@@ -1068,7 +1068,11 @@ void Joystick::_executeButtonAction(const QString& action, bool buttonDown)
         if (buttonDown && _activeVehicle) {
             for (auto& item : _customMavCommands) {
                 if (action == item.name()) {
-                    item.send(_activeVehicle);
+                    if (!item.send(_activeVehicle)) {
+                        qCWarning(JoystickValuesLog)
+                                << "Blocked custom joystick MAV command while vehicle is disconnected or airborne:"
+                                << item.name() << item.safetyClass();
+                    }
                     return;
                 }
             }

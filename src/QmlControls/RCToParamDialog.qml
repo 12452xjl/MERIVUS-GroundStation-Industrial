@@ -25,7 +25,45 @@ QGCPopupDialog {
 
     property alias tuningFact: controller.tuningFact
 
-    onAccepted: QGroundControl.multiVehicleManager.activeVehicle.sendParamMapRC(tuningFact.name, scale.text, centerValue.text, tuningID.currentIndex, minValue.text, maxValue.text)
+    function _maintenanceWriteError(vehicle) {
+        if (!vehicle) return qsTr("没有可用的目标飞行器。")
+        if (!vehicle.initialConnectComplete
+                || !vehicle.vehicleLinkManager
+                || vehicle.vehicleLinkManager.communicationLost) {
+            return qsTr("目标飞行器尚未完成连接，或链路已断开。")
+        }
+        if (vehicle.armed || vehicle.flying) {
+            return qsTr("飞行中或已解锁时禁止修改 RC 参数映射。")
+        }
+        var values = [Number(scale.text), Number(centerValue.text),
+                      Number(minValue.text), Number(maxValue.text)]
+        for (var i = 0; i < values.length; i++) {
+            if (!isFinite(values[i])) return qsTr("参数值必须是有限数字。")
+        }
+        if (typeof globals !== "undefined" && globals.guidedControllerFlyView) {
+            var guided = globals.guidedControllerFlyView
+            if (!guided.fleetHealthCenter
+                    || typeof guided.fleetHealthCenter.evaluateTaskGate !== "function") {
+                return qsTr("舰队健康门禁尚未就绪，参数写入已阻止。")
+            }
+            var gate = guided.fleetHealthCenter.evaluateTaskGate([Number(vehicle.id)], false)
+            if (!gate || gate.allowed !== true) {
+                return qsTr("目标飞行器未通过舰队健康门禁。")
+            }
+        }
+        return ""
+    }
+
+    onAccepted: {
+        var vehicle = QGroundControl.multiVehicleManager.activeVehicle
+        var error = _maintenanceWriteError(vehicle)
+        if (error.length > 0) {
+            mainWindow.showMessageDialog(qsTr("RC 参数映射已阻止"), error)
+            return
+        }
+        vehicle.sendParamMapRC(tuningFact.name, Number(scale.text), Number(centerValue.text),
+                               tuningID.currentIndex, Number(minValue.text), Number(maxValue.text))
+    }
 
     RCToParamDialogController {
         id: controller

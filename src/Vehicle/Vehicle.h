@@ -12,13 +12,21 @@
 #include <QElapsedTimer>
 #include <QObject>
 #include <QVariantList>
+#include <QVariantMap>
 #include <QGeoCoordinate>
 #include <QTime>
 #include <QQueue>
+#include <QMap>
 #include <QSharedPointer>
+#include <QPointer>
+#include <QVector>
+#include <functional>
+#include <memory>
 
 #include "FactGroup.h"
 #include "QGCMAVLink.h"
+#include "VehicleTelemetryObserver.h"
+#include "VehicleMissionExecutionObserver.h"
 #include "QmlObjectListModel.h"
 #include "MAVLinkProtocol.h"
 #include "MAVLinkStreamConfig.h"
@@ -58,6 +66,7 @@ class EventHandler;
 class UAS;
 class UASInterface;
 class FirmwarePlugin;
+class QGCCorePlugin;
 class FirmwarePluginManager;
 class AutoPilotPlugin;
 class ParameterManager;
@@ -79,6 +88,15 @@ class LinkManager;
 class InitialConnectStateMachine;
 class Autotune;
 class RemoteIDManager;
+class FleetMissionStartupTransaction;
+class FleetStartupMemorySeal;
+class MultiVehicleManager;
+class FleetOptionalTelemetryConfigurationBasis;
+class FleetOptionalTelemetryConfigurationRun;
+class FleetLinkLatencyRun;
+class FleetCameraStreamRun;
+class FleetCameraStreamControlBasis;
+class FleetCameraStreamControlRun;
 
 namespace events {
 namespace parser {
@@ -91,9 +109,18 @@ Q_DECLARE_LOGGING_CATEGORY(VehicleLog)
 class Vehicle : public FactGroup
 {
     Q_OBJECT
+    friend class FleetOptionalTelemetryConfigurationBasis;
+    friend class FleetOptionalTelemetryConfigurationRun;
+    friend class FleetLinkLatencyRun;
+    friend class FleetCameraStreamRun;
+    friend class FleetCameraStreamControlBasis;
+    friend class FleetCameraStreamControlRun;
 
     friend class InitialConnectStateMachine;
+    friend class ParameterManager;                // Native Fleet read-only transport gate
+    friend class PlanManager;                     // Native scoped mission read/deployment transport only
     friend class VehicleLinkManager;
+    friend class FleetStartupMemorySeal;           // Native whole-group startup memory fence only
     friend class VehicleBatteryFactGroup;           // Allow VehicleBatteryFactGroup to call _addFactGroup
     friend class SendMavCommandWithSignallingTest;  // Unit test
     friend class SendMavCommandWithHandlerTest;     // Unit test
@@ -428,7 +455,10 @@ public:
     /// Clear Messages
     Q_INVOKABLE void clearMessages();
 
-    Q_INVOKABLE void sendPlan(QString planFile);
+    // C++/backend-only plan upload entry. Keep this out of the QML method
+    // surface so arbitrary QML/plugins cannot bypass PlanMasterController's
+    // target and operation-identity checks.
+    void sendPlan(QString planFile);
 
     /// Used to check if running current version is equal or higher than the one being compared.
     //  returns 1 if current > compare, 0 if current == compare, -1 if current < compare
@@ -464,7 +494,7 @@ public:
     Q_INVOKABLE void clearAllParamMapRC(void);
 
     /// Removes the vehicle from the system
-    Q_INVOKABLE void closeVehicle(void) { _vehicleLinkManager->closeVehicle(); }
+    Q_INVOKABLE void closeVehicle(void);
 
     /// Trigger camera using MAV_CMD_DO_DIGICAM_CONTROL command
     Q_INVOKABLE void triggerSimpleCamera(void);
@@ -735,11 +765,15 @@ public:
     MissionManager*                 missionManager      () { return _missionManager; }
     GeoFenceManager*                geoFenceManager     () { return _geoFenceManager; }
     RallyPointManager*              rallyPointManager   () { return _rallyPointManager; }
-    ParameterManager*               parameterManager    () { return _parameterManager; }
-    ParameterManager*               parameterManager    () const { return _parameterManager; }
+    ParameterManager*               parameterManager    ();
+    ParameterManager*               parameterManager    () const;
     VehicleLinkManager*             vehicleLinkManager  () { return _vehicleLinkManager; }
     FTPManager*                     ftpManager          () { return _ftpManager; }
     ComponentInformationManager*    compInfoManager     () { return _componentInformationManager; }
+    // Native callback-lifetime fence only. Valid during normal initial
+    // connection, but false while this Vehicle is closing/being removed.
+    // Not metadata availability, source authentication or command permission.
+    bool componentInformationCallbackAllowed() const;
     VehicleObjectAvoidance*         objectAvoidance     () { return _objectAvoidance; }
     Autotune*                       autotune            () const { return _autotune; }
     RemoteIDManager*                remoteIDManager     () { return _remoteIDManager; }
@@ -771,13 +805,15 @@ public:
     ///
     bool isMavCommandPending(int targetCompId, MAV_CMD command);
 
-    /// Same as sendMavCommand but available from Qml.
-    Q_INVOKABLE void sendCommand(int compId, int command, bool showError, double param1 = 0.0, double param2 = 0.0, double param3 = 0.0, double param4 = 0.0, double param5 = 0.0, double param6 = 0.0, double param7 = 0.0);
+    /// Same as sendMavCommand, intentionally backend-only. QML command
+    /// surfaces must use an explicit safety-class/confirmation controller.
+    void sendCommand(int compId, int command, bool showError, double param1 = 0.0, double param2 = 0.0, double param3 = 0.0, double param4 = 0.0, double param5 = 0.0, double param6 = 0.0, double param7 = 0.0);
 
     typedef enum {
         MavCmdResultCommandResultOnly,          ///< commandResult specifies full success/fail info
         MavCmdResultFailureNoResponseToCommand, ///< No response from vehicle to command
         MavCmdResultFailureDuplicateCommand,    ///< Unable to send command since duplicate is already being waited on for response
+        MavCmdResultFailureLateAckQuarantine,   ///< Command temporarily blocked after a no-response timeout to quarantine delayed ACKs
     } MavCmdResultFailureCode_t;
 
     /// Callback for sendMavCommandWithHandler which handles MAV_RESULT_IN_PROGRESS acks
@@ -831,7 +867,11 @@ public:
     /// Requests the vehicle to send the specified message. Will retry a number of times.
     ///     @param resultHandler Callback for result
     ///     @param resultHandlerData Opaque data passed back to resultHandler
-    void requestMessage(RequestMessageResultHandler resultHandler, void* resultHandlerData, int compId, int messageId, float param1 = 0.0f, float param2 = 0.0f, float param3 = 0.0f, float param4 = 0.0f, float param5 = 0.0f);
+    ///     @param callbackOwner Optional native lifetime only; when destroyed,
+    ///            terminate locally without invoking borrowed callback data.
+    void requestMessage(RequestMessageResultHandler resultHandler, void* resultHandlerData, int compId, int messageId,
+        float param1 = 0.0f, float param2 = 0.0f, float param3 = 0.0f, float param4 = 0.0f, float param5 = 0.0f,
+        QObject* callbackOwner = nullptr);
 
     int firmwareMajorVersion() const { return _firmwareMajorVersion; }
     int firmwareMinorVersion() const { return _firmwareMinorVersion; }
@@ -850,6 +890,181 @@ public:
     QString gitHash() const { return _gitHash; }
     quint64 vehicleUID() const { return _uid; }
     QString vehicleUIDStr();
+
+    /// Native C++ only: immutable fields from an actual AUTOPILOT_VERSION
+    /// receive, never InitialConnect fallback capabilities or cache values.
+    /// Owner/GUI-thread read; monotonic age domain is 1..120000 ms. It is not
+    /// authentication, hardware qualification, or an execution permission.
+    QVariantMap autopilotVersionObservation(qint64 maximumAgeMs = 60000) const;
+    bool autopilotVersionObservationSourceMatches(LinkInterface* expectedLink) const;
+    // Callback-free lifecycle identity only. No sample availability, freshness,
+    // origin/HOME validity, authentication or permission is implied.
+    QString autopilotVersionObservationSourceEpochMemory() const;
+    // Native callback-free final source/content/age check. The caller must
+    // also retain the actual PRIMARY weak owner; this is not reachability,
+    // hardware/firmware authentication, a datum proof or an execution permit.
+    bool autopilotVersionObservationMemoryCurrent(LinkInterface* expectedPrimary,
+        const QString& sourceEpoch, const QString& contentRevision,
+        const QString& contentHash, qint64 maximumAgeMs = 30000) const;
+    // Non-owning native pointer to this actual VERSION source, only while the
+    // same callback-free source/content/30s-age check succeeds. No weak.lock()
+    // or temporary strong ownership; caller retains QPointer + PRIMARY owner.
+    LinkInterface* autopilotVersionObservationPrimaryLinkMemory() const;
+    // Explicit native passive observer; never requests streams or controls a
+    // vehicle. One actual current primary link is frozen for this binding.
+    QVariantMap bindFleetTelemetryObserver(VehicleTelemetryObserver* observer);
+    bool unbindFleetTelemetryObserver(VehicleTelemetryObserver* observer, const QString& sourceEpoch);
+    bool fleetTelemetryBindingMatches(VehicleTelemetryObserver* observer, const QString& sourceEpoch) const;
+    // Execution provenance is installed only inside the actual native MODE
+    // queue path, never by a caller bind/import or a public snapshot.
+    bool fleetExecutionBindingMatches(VehicleMissionExecutionObserver* observer, const QString& sourceEpoch) const;
+    bool unbindFleetExecutionObserver(VehicleMissionExecutionObserver* observer, const QString& sourceEpoch);
+    QVariantMap requestFleetAutopilotVersion(LinkInterface* expectedLink, std::function<bool()> authorizationFence);
+    enum class FleetStartupStep { Seq0 = 0, NormalArm = 1, MissionModeOnly = 2 };
+    QVariantMap sendFleetStartupStep(QObject* transactionObject, LinkInterface* expectedPrimary,
+        const QString& startupId, const QString& stepId, FleetStartupStep step,
+        std::function<bool()> authorizationFence);
+    QVariantMap fleetStartupStepReceipt(QObject* transactionObject, const QString& startupId, const QString& stepId) const;
+    bool fleetStartupStepReceiptSourceMatches(QObject* transactionObject, LinkInterface* expectedPrimary,
+        const QString& startupId, const QString& stepId) const;
+    bool cancelFleetStartupStep(QObject* transactionObject, const QString& startupId, const QString& stepId);
+    bool fleetStartupTransportQuiescent() const;
+    // Passive recovery-review admission only. Includes normal command/wait,
+    // mission/fence/rally, parameter and FTP queues, not just native RX stacks.
+    // No request is sent; this does not prove remote task absence or a lease.
+    bool fleetOccupancyRecoveryTransportQuiescent(LinkInterface* expectedPrimary) const;
+    // Passive source identity only, valid even while a same-source RAW receive
+    // stack is active. No link virtual, freshness/ground check, or permission.
+    bool fleetOccupancyRecoverySourceMatches(LinkInterface* expectedPrimary,
+        const QString& expectedFlightEpoch, const QString& expectedVersionEpoch) const;
+    // Whole-set review's FINAL passive fence. Exact original two-channel
+    // semantic identity, <=2s age, ground/disarmed and all local queues quiet;
+    // no virtual link getter, OS call, notification or outgoing request.
+    bool fleetOccupancyRecoveryGroundMatches(LinkInterface* expectedPrimary,
+        const QVariantMap& frozenStableIdentity) const;
+    // Supplementary RAW coordinates, not estimator validity or a rebase permit.
+    // Original six-channel flight-state schema remains unchanged.
+    QVariantMap startupCoordinateObservation(qint64 maximumAgeMs = 3000) const;
+    bool startupCoordinateObservationSourceMatches(LinkInterface* expectedPrimary) const;
+    // Independent passive MAVLink2 ODOMETRY receipts. Metadata is not PX4
+    // local/home validity, a clock/frame relation, or permission to rebase.
+    QVariantMap startupOdometryObservation(qint64 maximumAgeMs = 3000) const;
+    QVariantMap startupOdometryReferenceObservation(qint64 maximumAgeMs = 3000) const;
+    bool startupOdometryObservationSourceMatches(LinkInterface* expectedPrimary) const;
+    // Independent, passive event-based GPS_GLOBAL_ORIGIN reference. Age is
+    // diagnostic, not a periodic freshness requirement or origin certification.
+    QVariantMap startupGlobalOriginObservation() const;
+    bool startupGlobalOriginObservationSourceMatches(LinkInterface* expectedPrimary) const;
+    // Independent passive ALTITUDE same-message observations. Diagnostic only:
+    // no v1-v3 policy/admission or command permission consumes this ledger.
+    QVariantMap startupAltitudeObservation(qint64 maximumAgeMs = 3000) const;
+    bool startupAltitudeObservationSourceMatches(LinkInterface* expectedPrimary) const;
+    bool startupAltitudeHomeReferenceMatches(LinkInterface* expectedPrimary,
+        const QVariantMap& homeCoordinates, qint64 maximumAgeMs) const;
+    // Independent v4 scope monitor. It reports observed constraints only,
+    // never a startup permission, and does not alter the step33 receipt.
+    QVariantMap fleetStartupAltitudeMonitor(QObject* actualOwner, LinkInterface* actualPrimary,
+        const QString& startupId, const QVariantMap& originalReference) const;
+    bool retireFleetStartupAltitudeMonitor(QObject* actualOwner, const QString& startupId);
+    // Drain-only identity, including after owner destruction. Never a source
+    // or permission check; unrelated/unbound scopes have no owned ALT stack.
+    bool fleetStartupAltitudeTransportQuiescent(const QString& startupId, const QString& transactionEpoch) const;
+    // Native, passive PRIMARY SYS_STATUS / ESTIMATOR_STATUS receipts only.
+    // Independent of the six flight channels and startup/ODOMETRY contracts;
+    // age is local monotonic time, not authentication or a flight permission.
+    QVariantMap fleetHealthTelemetryObservation(qint64 maximumAgeMs = 3000) const;
+    // Passive original PRIMARY BATTERY_STATUS reports. Remaining time is a
+    // locally aged autopilot estimate, never measured endurance or a permit.
+    // C++ only: portable maps cannot install/restore this native ledger.
+    QVariantMap fleetBatteryTelemetryObservation(qint64 maximumAgeMs = 3000) const;
+    // Independent bounded decline of locally received SOC reports. This can
+    // only lower another energy estimate; it certifies neither pack nor range.
+    QVariantMap fleetBatteryDrainObservation(qint64 maximumAgeMs = 3000) const;
+    // Passive original PRIMARY MESSAGE_INTERVAL reports for 62/74/83 and
+    // separate bounded local receive windows. Callback-free native getter;
+    // never requests streams, occupies an observer slot or permits a change.
+    QVariantMap optionalTelemetryObservations(qint64 maximumAgeMs = 30000) const;
+    // Original PRIMARY/default-component encoded MAVLink reception only.
+    // Bounded local delivery observations, not bandwidth, loss, RTT or a permit.
+    // C++ only; the getter has no Link virtual call, callback or request.
+    QVariantMap fleetLocalReceptionObservation() const;
+    // Passive original PRIMARY camera-component 269/270 observations only.
+    // C++ memory getter: no URI/name disclosure, requests or control authority.
+    QVariantMap fleetCameraStreamObservation(qint64 maximumAgeMs = 3000) const;
+    std::shared_ptr<FleetCameraStreamRun> prepareFleetCameraStreamCapture(QObject* actualOwner,
+        LinkInterface* expectedPrimary, int componentId, int streamId, qint64 remainingMs,
+        const std::function<bool()>& authorizationFence);
+    bool advanceFleetCameraStreamCapture(QObject* actualOwner, const std::shared_ptr<FleetCameraStreamRun>& run);
+    QVariantMap fleetCameraStreamCaptureSnapshot(QObject* actualOwner, const std::shared_ptr<FleetCameraStreamRun>& run) const;
+    static QVariantMap fleetCameraStreamCaptureRetiredSnapshot(QObject* actualOwner, const std::shared_ptr<FleetCameraStreamRun>& run);
+    bool cancelFleetCameraStreamCapture(QObject* actualOwner, const std::shared_ptr<FleetCameraStreamRun>& run);
+    bool fleetCameraStreamCaptureTransportQuiescent() const;
+    // One fresh native capture may be sealed once for an explicitly reviewed
+    // opposite reported RUNNING target. Maps/IDs cannot restore this basis.
+    std::shared_ptr<FleetCameraStreamControlBasis> sealFleetCameraStreamControlBasis(QObject* actualCapture,
+        const std::shared_ptr<FleetCameraStreamRun>& capture, bool targetRunning, qint64 remainingMs,
+        const std::function<bool()>& pureSourceFence);
+    bool fleetCameraStreamControlBasisCurrent(const std::shared_ptr<FleetCameraStreamControlBasis>& basis) const;
+    QVariantMap fleetCameraStreamControlBasisSummary(const std::shared_ptr<FleetCameraStreamControlBasis>& basis) const;
+    std::shared_ptr<FleetCameraStreamControlRun> startFleetCameraStreamControl(QObject* actualControl,
+        const std::shared_ptr<FleetCameraStreamControlBasis>& basis, const std::function<bool()>& actualTwoAccountFinalFence);
+    bool advanceFleetCameraStreamControl(QObject* actualControl, const std::shared_ptr<FleetCameraStreamControlRun>& run);
+    QVariantMap fleetCameraStreamControlSnapshot(QObject* actualControl, const std::shared_ptr<FleetCameraStreamControlRun>& run) const;
+    static QVariantMap fleetCameraStreamControlRetiredSnapshot(QObject* actualControl, const std::shared_ptr<FleetCameraStreamControlRun>& run);
+    bool cancelFleetCameraStreamControl(QObject* actualControl, const std::shared_ptr<FleetCameraStreamControlRun>& run);
+    // One explicit targeted TIMESYNC-v2 diagnostic. The opaque native run
+    // cannot be recreated from IDs/maps; no clock, link or flight authority.
+    std::shared_ptr<FleetLinkLatencyRun> prepareFleetLinkLatencyCapture(QObject* actualOwner,
+        LinkInterface* expectedPrimary, qint64 remainingMs, const std::function<bool()>& authorizationFence);
+    bool advanceFleetLinkLatencyCapture(QObject* actualOwner, const std::shared_ptr<FleetLinkLatencyRun>& run);
+    QVariantMap fleetLinkLatencyCaptureSnapshot(QObject* actualOwner, const std::shared_ptr<FleetLinkLatencyRun>& run) const;
+    static QVariantMap fleetLinkLatencyCaptureRetiredSnapshot(QObject* actualOwner,
+        const std::shared_ptr<FleetLinkLatencyRun>& run);
+    bool cancelFleetLinkLatencyCapture(QObject* actualOwner, const std::shared_ptr<FleetLinkLatencyRun>& run);
+    bool fleetLinkLatencyCaptureTransportQuiescent() const;
+    // Explicit native read service only. COMMAND 510, one of 62/74/83;
+    // accepted ACK plus an original matching 244 are observations, not an
+    // authenticated response, stream change, measured rate or permission.
+    QVariantMap beginFleetMessageIntervalQuery(QObject* actualOwner, LinkInterface* expectedPrimary,
+        int messageId, std::function<bool()> authorizationFence);
+    QVariantMap fleetMessageIntervalQuerySnapshot(QObject* actualOwner, const QString& requestId) const;
+    bool cancelFleetMessageIntervalQuery(QObject* actualOwner, const QString& requestId);
+    // A temporary RAW-stack fence, not a source/freshness/authorization test.
+    // The service checks its original deadline/source separately before waiting.
+    bool fleetMessageIntervalQueryTransportQuiescent() const;
+    std::shared_ptr<FleetOptionalTelemetryConfigurationBasis> sealFleetOptionalTelemetryCapture(QObject* actualCapture,
+        const QStringList& queryIds, qint64 remainingMs, std::function<bool()> pureSourceFence);
+    bool fleetOptionalTelemetryConfigurationBasisCurrent(
+        const std::shared_ptr<FleetOptionalTelemetryConfigurationBasis>& basis) const;
+    QVariantMap fleetOptionalTelemetryConfigurationBasisSummary(
+        const std::shared_ptr<FleetOptionalTelemetryConfigurationBasis>& basis) const;
+    std::shared_ptr<FleetOptionalTelemetryConfigurationRun> startFleetOptionalTelemetryConfiguration(QObject* actualConfig,
+        const std::shared_ptr<FleetOptionalTelemetryConfigurationBasis>& basis, int positiveExactIntervalUs,
+        std::function<bool()> actualTwoAccountFinalFence);
+    bool advanceFleetOptionalTelemetryConfiguration(QObject* actualConfig,
+        const std::shared_ptr<FleetOptionalTelemetryConfigurationRun>& run);
+    QVariantMap fleetOptionalTelemetryConfigurationSnapshot(QObject* actualConfig,
+        const std::shared_ptr<FleetOptionalTelemetryConfigurationRun>& run) const;
+    static QVariantMap fleetOptionalTelemetryConfigurationRetiredSnapshot(QObject* actualConfig,
+        const std::shared_ptr<FleetOptionalTelemetryConfigurationRun>& run);
+    bool cancelFleetOptionalTelemetryConfiguration(QObject* actualConfig,
+        const std::shared_ptr<FleetOptionalTelemetryConfigurationRun>& run);
+    // Native observed ground POSCTL source only, not an execution permit.
+    // Allows either armed state only when current cache and original RAW agree.
+    bool fleetArmedGroundReviewSourceMatches(LinkInterface* expectedPrimary) const;
+
+    /// Native C++ only: six fixed raw flight-state receive channels. Never
+    /// uses display/cache state, requests telemetry or issues a command.
+    /// All age limits are monotonic milliseconds in the 1..120000 domain.
+    QVariantMap flightStateObservation(qint64 maximumPositionAgeMs = 3000,
+        qint64 maximumStatusAgeMs = 5000, qint64 maximumHomeAgeMs = 60000,
+        qint64 maximumProgressAgeMs = 10000) const;
+    /// Native risk identity keeps full RAW evidence, with a separate monotonic
+    /// revision/hash excluding ONLY GLOBAL_POSITION_INT's transport boot clock.
+    /// Does not authenticate telemetry or attribute execution/completion.
+    QVariantMap flightStateRiskObservation(qint64 maximumPositionAgeMs = 3000,
+        qint64 maximumStatusAgeMs = 5000, qint64 maximumHomeAgeMs = 60000,
+        qint64 maximumProgressAgeMs = 10000) const;
 
     bool soloFirmware() const { return _soloFirmware; }
     void setSoloFirmware(bool soloFirmware);
@@ -931,6 +1146,7 @@ public slots:
     void _offlineVehicleTypeSettingChanged  (QVariant varVehicleType);  // Should only be used by MissionController to set vehicle type from Plan file
 
 signals:
+    void fleetStartupStepObservationChanged();
     void coordinateChanged              (QGeoCoordinate coordinate);
     void joystickEnabledChanged         (bool enabled);
     void mavlinkMessageReceived         (const mavlink_message_t& message);
@@ -948,6 +1164,9 @@ signals:
     void defaultHoverSpeedChanged       (double hoverSpeed);
     void firmwareTypeChanged            ();
     void vehicleTypeChanged             ();
+    // Source revocation only: never a request, write, authentication or flight
+    // permit. Emitted after a new raw version source identity is committed.
+    void autopilotVersionObservationSourceChanged();
     void cameraManagerChanged           ();
     void hobbsMeterChanged              ();
     void capabilitiesKnownChanged       (bool capabilitiesKnown);
@@ -1053,8 +1272,13 @@ private slots:
     void _firstMissionLoadComplete          ();
     void _firstGeoFenceLoadComplete         ();
     void _firstRallyPointLoadComplete       ();
+    void _firstMissionLoadCompleteWithOperationId(quint64 operationId, bool removeAllRequested);
+    void _firstGeoFenceLoadCompleteWithOperationId(quint64 operationId, bool removeAllRequested);
+    void _firstRallyPointLoadCompleteWithOperationId(quint64 operationId, bool removeAllRequested);
     void _sendMavCommandResponseTimeoutCheck();
     void _clearCameraTriggerPoints          ();
+    void _clearCameraTriggerPointsWithOperationId(quint64 operationId, bool status);
+    void _clearTrajectoryPointsWithOperationId(quint64 operationId, bool status);
     void _updateDistanceHeadingToHome       ();
     void _updateMissionItemIndex            ();
     void _updateHeadingToNextWP             ();
@@ -1072,6 +1296,101 @@ private slots:
     void _altitudeAboveTerrainReceived      (bool sucess, QList<double> heights);
 
 private:
+    // ParameterManager only: retain the original cache HASH acknowledgement
+    // source through the actual link-write entry, not a general sender API.
+    bool _sendParameterCacheHashAck(LinkInterface* expectedLink, mavlink_message_t message,
+                                   std::function<bool()> sourceFence);
+    // ParameterManager import only. One native row owns this plain ledger
+    // across retries; writer entry remains a fact after cancellation/death.
+    struct ParameterImportWriteLedger { quint64 entered = 0; };
+    bool _parameterImportEncoding(int componentId, bool& numericFloat) const;
+    bool _sendParameterImport(LinkInterface* original, mavlink_message_t logical,
+                              const mavlink_param_set_t& expectedWire, std::function<bool()> sourceFence,
+                              const std::shared_ptr<ParameterImportWriteLedger>& ledger);
+    bool _fleetTelemetrySourceAllowed(LinkInterface* link) const;
+    void _observeFleetTelemetry(const mavlink_message_t& originalMessage, LinkInterface* link);
+    void _retireFleetTelemetryObserver(const QString& fixedCode);
+    bool _fleetExecutionSourceAllowed(LinkInterface* link) const;
+    bool _advanceFleetExecutionSlotRevision();
+    bool _bindFleetExecutionObserver(VehicleMissionExecutionObserver* observer, LinkInterface* link,
+        VehicleMissionExecutionObserver::QueueContext* context);
+    void _observeFleetExecution(const mavlink_message_t& originalMessage, LinkInterface* link);
+    void _retireFleetExecutionObserver(const QString& fixedCode, bool deferNotification = false);
+    // Transport-side safety gates for C++/QML command entry points. UI checks
+    // remain useful for UX, but stale dialogs and plugins must not bypass these
+    // backend checks.
+    bool _commandTransportAvailable(const char* operation) const;
+    bool _maintenanceCommandAllowed(const char* operation) const;
+
+    void _initializeAutopilotVersionObservation();
+    bool _autopilotVersionSourceAllowed(LinkInterface* sourceLink) const;
+    void _invalidateAutopilotVersionObservation(const QString& source);
+    quint64 _prepareAutopilotVersionObservation(const mavlink_message_t& originalMessage, LinkInterface* sourceLink);
+    bool _autopilotVersionObservationUpdateCurrent(quint64 token, const QString& epoch) const;
+    void _completeAutopilotVersionObservation(quint64 token, const QString& epoch,
+        const mavlink_message_t& originalMessage, LinkInterface* sourceLink, qint64 receivedAtMs);
+    void _invalidateFlightStateObservations(const QString& source);
+    void _invalidateFlightStateObservation(const QString& channel, const QString& source);
+    quint64 _prepareFlightStateObservation(const mavlink_message_t& originalMessage, LinkInterface* sourceLink,
+        QString* channel, QVariantMap* value);
+    bool _flightStateObservationUpdateCurrent(const QString& channel, quint64 token, const QString& epoch) const;
+    void _completeFlightStateObservation(const QString& channel, quint64 token, const QString& epoch,
+        const QVariantMap& value, LinkInterface* sourceLink, qint64 receivedAtMs);
+    void _initializeFleetHealthTelemetryObservation();
+    void _invalidateFleetHealthTelemetryObservation(const QString& source);
+    bool _fleetHealthTelemetrySourceAllowed(LinkInterface* sourceLink) const;
+    bool _fleetHealthTelemetrySourceMatches() const;
+    quint64 _prepareFleetHealthTelemetryObservation(const mavlink_message_t& originalMessage, LinkInterface* sourceLink,
+        QString* channel, QVariantMap* value);
+    void _completeFleetHealthTelemetryObservation(const QString& channel, quint64 token, const QString& epoch,
+        const QVariantMap& value, LinkInterface* sourceLink, qint64 receivedAtMs, qint64 startupReceivedAtMs);
+    void _initializeFleetBatteryTelemetryObservation();
+    void _invalidateFleetBatteryTelemetryObservation();
+    bool _fleetBatteryTelemetrySourceAllowed(LinkInterface* sourceLink) const;
+    bool _fleetBatteryTelemetrySourceMatches() const;
+    bool _fleetBatteryTelemetryMemoryCurrent() const;
+    quint64 _prepareFleetBatteryTelemetryObservation(const mavlink_message_t& originalMessage, LinkInterface* sourceLink,
+        int* batteryId, QVariantMap* value);
+    struct FleetBatteryDrainIngress {
+        QPointer<LinkInterface> link;
+        WeakLinkInterfacePtr primary;
+        QString versionEpoch;
+        qint64 receivedAtMs = -1;
+        quint64 baselineReceipt = 0;
+        int vehicleId = 0, componentId = 0, firmwareType = -1, vehicleType = -1;
+        bool eligible = false;
+    };
+    struct FleetBatteryTelemetryRow;
+    FleetBatteryDrainIngress _prepareFleetBatteryDrainIngress(const mavlink_message_t& originalMessage, LinkInterface* link) const;
+    void _observeFleetBatteryDrain(FleetBatteryTelemetryRow& row, quint64 receipt, const FleetBatteryDrainIngress& ingress);
+    void _resetFleetBatteryDrain(FleetBatteryTelemetryRow& row);
+    void _advanceFleetBatteryDrainRevision();
+    void _completeFleetBatteryTelemetryObservation(int batteryId, quint64 token, const QString& epoch,
+        const QVariantMap& value, LinkInterface* sourceLink, qint64 receivedAtMs, const FleetBatteryDrainIngress& drainIngress);
+    QVariantMap _fleetStartupEstimatorProjection(bool requireHealthy) const;
+    bool _fleetStartupEstimatorMemoryCurrent(bool requireHealthy) const;
+    void _initializeStartupGlobalOriginObservation();
+    void _invalidateStartupGlobalOriginObservation(const QString& source);
+    bool _startupGlobalOriginSourceAllowed(LinkInterface* sourceLink) const;
+    bool _startupGlobalOriginMemoryCurrent(LinkInterface* expectedPrimary, bool requireQuiescent) const;
+    quint64 _prepareStartupGlobalOriginObservation(const mavlink_message_t& originalMessage, LinkInterface* sourceLink);
+    void _completeStartupGlobalOriginObservation(quint64 token, const QString& epoch,
+        const mavlink_message_t& originalMessage, LinkInterface* sourceLink, qint64 receivedAtMs);
+    QVariantMap _startupGlobalOriginStableReference() const;
+    bool _fleetStartupGlobalOriginBasisCurrent() const;
+    void _initializeStartupAltitudeObservation();
+    void _invalidateStartupAltitudeObservation(const QString& source, bool sourceLost);
+    bool _startupAltitudeSourceAllowed(LinkInterface* sourceLink) const;
+    bool _startupAltitudeMemoryCurrent(LinkInterface* expectedPrimary, bool requireQuiescent) const;
+    quint64 _prepareStartupAltitudeObservation(const mavlink_message_t& originalMessage, LinkInterface* sourceLink, qint64 receivedAtMs);
+    void _completeStartupAltitudeObservation(quint64 token, const QString& epoch,
+        const mavlink_message_t& originalMessage, LinkInterface* sourceLink, qint64 receivedAtMs);
+    bool _bindFleetStartupAltitude(const QVariantMap& actualContext);
+    void _failFleetStartupAltitude(const QString& reason);
+    void _consumeFleetStartupAltitude(const QVariantMap& decoded, qint64 receivedAtMs);
+    bool _fleetStartupAltitudeCurrent() const;
+    qint64 _fleetStartupAltitudeMaximumGap() const;
+
     void _loadJoystickSettings          ();
     void _activeVehicleChanged          (Vehicle* newActiveVehicle);
     void _captureJoystick               ();
@@ -1084,7 +1403,8 @@ private:
     void _handleBatteryStatus           (mavlink_message_t& message);
     void _handleSysStatus               (mavlink_message_t& message);
     void _handleExtendedSysState        (mavlink_message_t& message);
-    void _handleCommandAck              (mavlink_message_t& message);
+    void _handleCommandAck              (mavlink_message_t& message, LinkInterface* sourceLink = nullptr,
+        const mavlink_message_t* originalMessage = nullptr);
     void _handleGpsRawInt               (mavlink_message_t& message);
     void _handleGlobalPositionInt       (mavlink_message_t& message);
     void _handleAltitude                (mavlink_message_t& message);
@@ -1128,7 +1448,8 @@ private:
     void _flightTimerStop               ();
     void _chunkedStatusTextTimeout      (void);
     void _chunkedStatusTextCompleted    (uint8_t compId);
-    void _setMessageInterval            (int messageId, int rate);
+    void _setMessageInterval            (MAVLinkStreamConfig::RequestId requestId, int messageId, int intervalUs);
+    static void _streamIntervalCommandResult(void*, int, const mavlink_command_ack_t&, MavCmdResultFailureCode_t);
     EventHandler& _eventHandler         (uint8_t compid);
     bool setFlightModeCustom            (const QString& flightMode, uint8_t* base_mode, uint32_t* custom_mode);
 
@@ -1194,6 +1515,385 @@ private:
     unsigned        _maxProtoVersion                        = 0;
     bool            _capabilityBitsKnown                    = false;
     uint64_t        _capabilityBits                         = 0;
+    // One bounded observation; no caller-supplied rows or components. Counter
+    // exhaustion is terminal for this Vehicle instance rather than wrapping.
+    QVariantMap     _autopilotVersionObservationFields;
+    QPointer<LinkInterface> _autopilotVersionObservationLink;
+    QMetaObject::Connection _autopilotVersionObservationLinkDestroyedConnection;
+    QElapsedTimer   _autopilotVersionObservationClock;
+    QPointer<VehicleTelemetryObserver> _fleetTelemetryObserver;
+    QPointer<LinkInterface> _fleetTelemetryLink;
+    QList<QMetaObject::Connection> _fleetTelemetryConnections;
+    QElapsedTimer _fleetTelemetryClock;
+    QString _fleetTelemetryEpoch;
+    quint64 _fleetTelemetrySequence = 0;
+    bool _fleetTelemetryReceiveBusy = false;
+    bool _fleetTelemetryRemoving = false;
+    QPointer<VehicleMissionExecutionObserver> _fleetExecutionObserver;
+    QPointer<LinkInterface> _fleetExecutionLink;
+    WeakLinkInterfacePtr _fleetExecutionPrimaryOwner;
+    QPointer<VehicleLinkManager> _fleetExecutionSourceLinks;
+    QPointer<MAVLinkProtocol> _fleetExecutionSourceProtocol;
+    QPointer<FirmwarePlugin> _messageIntervalSourcePlugin;
+    QPointer<QGCCorePlugin> _messageCommandSourceCore;
+    QPointer<TerrainProtocolHandler> _messageCommandSourceTerrain;
+    QPointer<FTPManager> _messageCommandSourceFtp;
+    QPointer<ImageProtocolManager> _messageCommandSourceImage;
+    QPointer<RemoteIDManager> _messageCommandSourceRemoteId;
+    QPointer<MultiVehicleManager> _fleetExecutionSourceVehicles;
+    QPointer<QGCToolbox> _fleetExecutionSourceToolbox;
+    struct OptionalTelemetryRow {
+        qint32 intervalUs = 0;
+        qint64 reportedAtMs = -1, newestFrameAtMs = -1, lastDroppedFrameAtMs = -1;
+        quint64 reportedReceiptSequence = 0, contentRevision = 0, frameReceiptSequence = 0;
+        bool reportedObserved = false;
+        QVector<qint64> receivedAtMs;
+    };
+    QMap<int, OptionalTelemetryRow> _optionalTelemetryRows;
+    QElapsedTimer _optionalTelemetryClock;
+    QPointer<LinkInterface> _optionalTelemetryPrimary;
+    WeakLinkInterfacePtr _optionalTelemetryPrimaryOwner;
+    QString _optionalTelemetryLedgerEpoch, _optionalTelemetryVersionEpoch;
+    qint64 _optionalTelemetryBoundAtMs = -1;
+    quint64 _optionalTelemetryNextReceipt = 0, _optionalTelemetryRevision = 0, _optionalTelemetryReceiveDepth = 0;
+    quint64 _optionalTelemetryMutationGeneration = 0, _optionalTelemetryWriteDepth = 0;
+    bool _optionalTelemetryMutationExhausted = false;
+    int _optionalTelemetryComponentId = 0, _optionalTelemetryFirmwareType = -1, _optionalTelemetryVehicleType = -1;
+    bool _optionalTelemetryExhausted = false, _optionalTelemetryProbeBusy = false;
+    void _initializeOptionalTelemetryObservations();
+    void _invalidateOptionalTelemetryObservations();
+    bool _optionalTelemetryRawSourceMatches(LinkInterface* sourceLink) const;
+    bool _optionalTelemetrySourceAllowed(LinkInterface* sourceLink);
+    bool _optionalTelemetrySourceMemoryCurrent() const;
+    void _observeOptionalTelemetry(const mavlink_message_t& original, LinkInterface* sourceLink, qint64 receivedAtMs);
+    struct FleetLocalReceptionFrame {
+        qint64 receivedAtMs = -1;
+        int frameBytes = 0;
+    };
+    struct FleetLocalReceptionIngress {
+        QPointer<LinkInterface> primary;
+        WeakLinkInterfacePtr primaryOwner;
+        QPointer<VehicleLinkManager> links;
+        QPointer<MAVLinkProtocol> protocol;
+        QPointer<MultiVehicleManager> vehicles;
+        QPointer<QGCToolbox> toolbox;
+        QString sourceEpoch, transportEpoch, versionEpoch;
+        quint64 receiptSequence = 0;
+        qint64 receivedAtMs = -1;
+        int vehicleId = 0, componentId = 0, firmwareType = -1, vehicleType = -1;
+        bool eligible = false;
+    };
+    QElapsedTimer _fleetLocalReceptionClock;
+    QVector<FleetLocalReceptionFrame> _fleetLocalReceptionFrames;
+    QPointer<LinkInterface> _fleetLocalReceptionPrimary;
+    WeakLinkInterfacePtr _fleetLocalReceptionPrimaryOwner;
+    QString _fleetLocalReceptionEpoch, _fleetLocalReceptionTransportEpoch, _fleetLocalReceptionVersionEpoch;
+    QString _fleetLocalReceptionReason = QStringLiteral("local-reception-unobserved");
+    qint64 _fleetLocalReceptionBoundAtMs = -1, _fleetLocalReceptionNewestAtMs = -1, _fleetLocalReceptionLastDroppedAtMs = -1;
+    quint64 _fleetLocalReceptionNextReceipt = 0;
+    int _fleetLocalReceptionVehicleId = 0, _fleetLocalReceptionComponentId = 0;
+    int _fleetLocalReceptionFirmwareType = -1, _fleetLocalReceptionVehicleType = -1;
+    bool _fleetLocalReceptionExhausted = false, _fleetLocalReceptionProbeBusy = false, _fleetLocalReceptionRemoving = false;
+    void _initializeFleetLocalReceptionObservation();
+    void _invalidateFleetLocalReceptionObservation(const QString& reason);
+    bool _fleetLocalReceptionRawSourceMatches(LinkInterface* sourceLink) const;
+    FleetLocalReceptionIngress _prepareFleetLocalReceptionIngress(const mavlink_message_t& original, LinkInterface* sourceLink, qint64 receivedAtMs);
+    void _observeFleetLocalReception(const mavlink_message_t& original, const FleetLocalReceptionIngress& originalIngress);
+    struct FleetCameraStreamRow {
+        mavlink_video_stream_information_t information{};
+        mavlink_video_stream_status_t status{};
+        qint64 informationAtMs = -1, statusAtMs = -1;
+        quint64 informationReceipt = 0, statusReceipt = 0;
+        quint64 informationRevision = 0, statusRevision = 0, statusInformationRevision = 0;
+        // Per-row configuration token, allocated from the same never-reused
+        // native revision sequence; only Info RUNNING changes retain it.
+        quint64 configurationRevision = 0;
+        bool informationObserved = false, statusObserved = false;
+        bool informationValid = false, statusValid = false;
+    };
+    struct FleetCameraStreamIngress {
+        QPointer<LinkInterface> primary;
+        WeakLinkInterfacePtr primaryOwner;
+        QPointer<VehicleLinkManager> links;
+        QPointer<MAVLinkProtocol> protocol;
+        QPointer<MultiVehicleManager> vehicles;
+        QPointer<QGCToolbox> toolbox;
+        QString sourceEpoch, transportEpoch, versionEpoch;
+        quint64 receiptSequence = 0;
+        qint64 receivedAtMs = -1;
+        int vehicleId = 0, componentId = 0, defaultComponentId = 0, firmwareType = -1, vehicleType = -1;
+        bool eligible = false;
+    };
+    QElapsedTimer _fleetCameraStreamClock;
+    QMap<int, FleetCameraStreamRow> _fleetCameraStreamRows;
+    QMap<int, int> _fleetCameraStreamDeclaredCounts;
+    QPointer<LinkInterface> _fleetCameraStreamPrimary;
+    WeakLinkInterfacePtr _fleetCameraStreamPrimaryOwner;
+    QString _fleetCameraStreamEpoch, _fleetCameraStreamTransportEpoch, _fleetCameraStreamVersionEpoch;
+    QString _fleetCameraStreamReason = QStringLiteral("camera-stream-unobserved");
+    qint64 _fleetCameraStreamBoundAtMs = -1, _fleetCameraStreamNewestAtMs = -1;
+    quint64 _fleetCameraStreamNextReceipt = 0, _fleetCameraStreamRevision = 0;
+    quint64 _fleetCameraStreamMutation = 0;
+    bool _fleetCameraStreamMutationExhausted = false;
+    int _fleetCameraStreamVehicleId = 0, _fleetCameraStreamDefaultComponentId = 0;
+    int _fleetCameraStreamFirmwareType = -1, _fleetCameraStreamVehicleType = -1;
+    bool _fleetCameraStreamExhausted = false, _fleetCameraStreamProbeBusy = false;
+    bool _fleetCameraStreamRemoving = false, _fleetCameraStreamSaturated = false;
+    void _initializeFleetCameraStreamObservation();
+    void _invalidateFleetCameraStreamObservation(const QString& reason);
+    bool _fleetCameraStreamRawSourceMatches(LinkInterface* sourceLink) const;
+    FleetCameraStreamIngress _prepareFleetCameraStreamIngress(const mavlink_message_t& original, LinkInterface* sourceLink, qint64 receivedAtMs);
+    void _observeFleetCameraStream(const mavlink_message_t& original, const FleetCameraStreamIngress& originalIngress);
+    static QVariantMap _fleetCameraStreamRowValue(int componentId, int streamId, const FleetCameraStreamRow& row,
+        qint64 now, qint64 maximumAgeMs, bool current, bool saturated);
+    QList<QMetaObject::Connection> _fleetExecutionConnections;
+    QElapsedTimer _fleetExecutionClock;
+    QString _fleetExecutionEpoch;
+    QString _fleetExecutionVersionEpoch;
+    quint64 _fleetExecutionSequence = 0;
+    quint64 _fleetExecutionSlotRevision = 0;
+    bool _fleetExecutionSlotExhausted = false;
+    mutable bool _fleetExecutionSourceProbeBusy = false;
+    bool _fleetExecutionBindBusy = false;
+    int _fleetExecutionComponentId = 0;
+    bool _fleetExecutionReceiveBusy = false;
+    bool _fleetExecutionRemoving = false;
+    struct FleetHealthTelemetryChannel {
+        QVariantMap value;
+        QString source = QStringLiteral("unknown");
+        quint64 receiptSequence = 0, contentRevision = 0, updateToken = 0;
+        quint64 lastEstimatorTimeUsec = 0;
+        qint64 receivedAtMs = -1, startupReceivedAtMs = -1;
+        bool observed = false, complete = false, updating = false;
+        bool estimatorTimeObserved = false, clockDiscontinuityObserved = false;
+    };
+    QMap<QString, FleetHealthTelemetryChannel> _fleetHealthTelemetryRows;
+    QPointer<LinkInterface> _fleetHealthTelemetryLink;
+    WeakLinkInterfacePtr _fleetHealthTelemetryWeakLink;
+    QPointer<VehicleLinkManager> _fleetHealthTelemetryLinks;
+    QPointer<MAVLinkProtocol> _fleetHealthTelemetryProtocol;
+    QPointer<MultiVehicleManager> _fleetHealthTelemetryVehicles;
+    QList<QMetaObject::Connection> _fleetHealthTelemetryLinkConnections;
+    QElapsedTimer _fleetHealthTelemetryClock;
+    QString _fleetHealthTelemetryEpoch, _fleetHealthTelemetryVersionEpoch;
+    quint64 _fleetHealthTelemetryNextReceipt = 0, _fleetHealthTelemetryRevision = 0;
+    quint64 _fleetHealthTelemetryReceiveDepth = 0;
+    int _fleetHealthTelemetryComponentId = 0, _fleetHealthTelemetryFirmwareType = -1, _fleetHealthTelemetryVehicleType = -1;
+    bool _fleetHealthTelemetryExhausted = false, _fleetHealthTelemetryRemoving = false;
+    struct FleetBatteryDrainSample {
+        qint64 receivedAtMs = -1, maximumGapMs = 0;
+        quint64 receipt = 0;
+        int percent = -1;
+    };
+    struct FleetBatteryDrainWindow {
+        quint64 startReceipt = 0, endReceipt = 0;
+        qint64 startAtMs = -1, endAtMs = -1, maximumGapMs = -1;
+        int startPercent = -1, endPercent = -1, sampleCount = 0;
+        bool published = false;
+    };
+    struct FleetBatteryTelemetryRow {
+        QVariantMap value;
+        quint64 receiptSequence = 0, contentRevision = 0, updateToken = 0;
+        qint64 receivedAtMs = -1;
+        bool observed = false, complete = false, updating = false;
+        QVector<FleetBatteryDrainSample> drainSamples;
+        FleetBatteryDrainWindow drainWindow;
+        qint64 drainReceivedAtMs = -1, drainPendingMaximumGapMs = 0;
+        int drainLastPercent = -1, drainFunction = -1, drainType = -1;
+        bool drainSampleOverflow = false;
+    };
+    QMap<int, FleetBatteryTelemetryRow> _fleetBatteryTelemetryRows;
+    QPointer<LinkInterface> _fleetBatteryTelemetryLink;
+    WeakLinkInterfacePtr _fleetBatteryTelemetryWeakLink;
+    QPointer<VehicleLinkManager> _fleetBatteryTelemetryLinks;
+    QPointer<MAVLinkProtocol> _fleetBatteryTelemetryProtocol;
+    QPointer<MultiVehicleManager> _fleetBatteryTelemetryVehicles;
+    QList<QMetaObject::Connection> _fleetBatteryTelemetryLinkConnections;
+    QElapsedTimer _fleetBatteryTelemetryClock;
+    QString _fleetBatteryTelemetryEpoch, _fleetBatteryTelemetryVersionEpoch;
+    quint64 _fleetBatteryTelemetryNextReceipt = 0, _fleetBatteryTelemetryRevision = 0;
+    quint64 _fleetBatteryTelemetryReceiveDepth = 0;
+    int _fleetBatteryTelemetryComponentId = 0, _fleetBatteryTelemetryFirmwareType = -1, _fleetBatteryTelemetryVehicleType = -1;
+    bool _fleetBatteryTelemetryExhausted = false, _fleetBatteryTelemetryRemoving = false;
+    bool _fleetBatteryTelemetrySlotOverflow = false;
+    quint64 _fleetBatteryDrainRevision = 0;
+    bool _fleetBatteryDrainExhausted = false;
+    QString         _autopilotVersionObservationEpoch;
+    QString         _autopilotVersionObservationSource = QStringLiteral("unknown");
+    QString         _autopilotVersionObservationContentHash;
+    qint64          _autopilotVersionObservationReceivedAtMs = -1;
+    quint64         _autopilotVersionObservationRevision = 0;
+    quint64         _autopilotVersionObservationUpdateToken = 0;
+    quint64         _autopilotVersionObservationLastReceipt = 0;
+    qint64          _fleetVersionReadLastAtMs = -1;
+    QString         _fleetVersionReadLastIssuedId;
+    quint64         _autopilotVersionObservationReceiveDepth = 0;
+    bool            _autopilotVersionObservationObserved = false;
+    bool            _autopilotVersionObservationComplete = false;
+    bool            _autopilotVersionObservationUpdating = false;
+    bool            _autopilotVersionObservationExhausted = false;
+    bool            _autopilotVersionObservationRemoving = false;
+    struct FlightStateObservationChannel {
+        QVariantMap value;
+        QString source = QStringLiteral("unknown");
+        QString contentHash;
+        qint64 receivedAtMs = -1;
+        quint64 contentRevision = 0;
+        QString riskContentHash;
+        quint64 riskContentRevision = 0;
+        quint64 receiptSequence = 0;
+        quint64 updateToken = 0;
+        bool observed = false;
+        bool complete = false;
+        bool updating = false;
+    };
+    QMap<QString, FlightStateObservationChannel> _flightStateObservations;
+    QPointer<LinkInterface> _flightStateObservationLink;
+    QMetaObject::Connection _flightStateObservationLinkDestroyedConnection;
+    QString _flightStateObservationEpoch;
+    quint64 _flightStateObservationRevision = 0;
+    quint64 _flightStateRiskObservationRevision = 0;
+    quint64 _flightStateObservationReceiptSequence = 0;
+    quint64 _fleetMissionObservationReceiveDepth = 0;
+    bool _fleetMissionObservationReceiveExhausted = false;
+    struct StartupCoordinateRow {
+        QVariantMap value;
+        QString contentHash, riskContentHash, rawPayloadHash;
+        quint64 updateToken = 0, receiptSequence = 0, contentRevision = 0, riskContentRevision = 0;
+        qint64 receivedAtMs = -1;
+        bool observed = false, complete = false, updating = false;
+    };
+    QMap<QString, StartupCoordinateRow> _startupCoordinateRows;
+    QPointer<LinkInterface> _startupCoordinateLink;
+    QString _startupCoordinateEpoch, _startupCoordinateVersionEpoch, _startupCoordinateFlightEpoch;
+    quint64 _startupCoordinateNextReceipt = 0, _startupCoordinateContentRevision = 0, _startupCoordinateRiskRevision = 0;
+    quint64 _startupCoordinateReceiveDepth = 0;
+    bool _startupCoordinateExhausted = false;
+    struct StartupOdometryRow {
+        QVariantMap value, referenceProjection;
+        QString contentHash, referenceHash, rawPayloadHash;
+        quint64 updateToken = 0, receiptSequence = 0;
+        qint64 receivedAtMs = -1;
+        int rawPayloadLength = 0;
+        bool observed = false, complete = false, updating = false;
+    };
+    StartupOdometryRow _startupOdometryRow;
+    QPointer<LinkInterface> _startupOdometryLink;
+    QMetaObject::Connection _startupOdometryLinkDestroyedConnection;
+    QString _startupOdometryEpoch, _startupOdometryVersionEpoch, _startupOdometryFlightEpoch;
+    QString _startupOdometrySource = QStringLiteral("unknown");
+    QString _startupOdometryLastPreparedReferenceHash;
+    quint64 _startupOdometryLastRawSampleTime = 0;
+    quint64 _startupOdometryNextReceipt = 0, _startupOdometryContentRevision = 0, _startupOdometryReferenceRevision = 0;
+    quint64 _startupOdometryReceiveDepth = 0, _startupOdometryClockDiscontinuityRevision = 0;
+    bool _startupOdometryExhausted = false, _startupOdometryClockDiscontinuityObserved = false, _startupOdometryRawSampleObserved = false;
+    bool _startupOdometryEverObservedRawFrame = false;
+    struct StartupGlobalOriginRow {
+        QVariantMap value, referenceProjection;
+        QString referenceHash, rawPayloadHash;
+        quint64 updateToken = 0, receiptSequence = 0;
+        qint64 receivedAtMs = -1;
+        int rawPayloadLength = 0;
+        bool observed = false, complete = false, updating = false;
+    };
+    StartupGlobalOriginRow _startupGlobalOriginRow;
+    QPointer<LinkInterface> _startupGlobalOriginLink;
+    WeakLinkInterfacePtr _startupGlobalOriginWeakLink;
+    QPointer<VehicleLinkManager> _startupGlobalOriginLinks;
+    QPointer<MAVLinkProtocol> _startupGlobalOriginProtocol;
+    QPointer<MultiVehicleManager> _startupGlobalOriginVehicles;
+    QList<QMetaObject::Connection> _startupGlobalOriginLinkConnections;
+    QElapsedTimer _startupGlobalOriginClock;
+    QString _startupGlobalOriginEpoch, _startupGlobalOriginVersionEpoch, _startupGlobalOriginFlightEpoch;
+    QString _startupGlobalOriginSource = QStringLiteral("unknown"), _startupGlobalOriginLastPreparedReferenceHash;
+    quint64 _startupGlobalOriginNextReceipt = 0, _startupGlobalOriginReferenceRevision = 0, _startupGlobalOriginReceiveDepth = 0;
+    int _startupGlobalOriginComponentId = 0, _startupGlobalOriginFirmwareType = -1, _startupGlobalOriginVehicleType = -1;
+    bool _startupGlobalOriginEverObservedRawFrame = false, _startupGlobalOriginExhausted = false, _startupGlobalOriginRemoving = false;
+    QVariantMap _fleetStartupGlobalOriginBasis;
+    struct StartupAltitudeRow {
+        QVariantMap value;
+        QString rawPayloadHash;
+        quint64 updateToken = 0, receiptSequence = 0;
+        qint64 receivedAtMs = -1;
+        int rawPayloadLength = 0;
+        bool observed = false, complete = false, updating = false;
+    };
+    StartupAltitudeRow _startupAltitudeRow;
+    QPointer<LinkInterface> _startupAltitudeLink;
+    WeakLinkInterfacePtr _startupAltitudeWeakLink;
+    QPointer<VehicleLinkManager> _startupAltitudeLinks;
+    QPointer<MAVLinkProtocol> _startupAltitudeProtocol;
+    QPointer<MultiVehicleManager> _startupAltitudeVehicles;
+    QList<QMetaObject::Connection> _startupAltitudeLinkConnections;
+    QElapsedTimer _startupAltitudeClock;
+    QString _startupAltitudeEpoch, _startupAltitudeVersionEpoch, _startupAltitudeFlightEpoch;
+    QString _startupAltitudeSource = QStringLiteral("unknown"), _startupAltitudeLastPreparedStateHash;
+    quint64 _startupAltitudeNextReceipt = 0, _startupAltitudeStateRevision = 0, _startupAltitudeReceiveDepth = 0;
+    quint64 _startupAltitudeLastRawSampleTime = 0, _startupAltitudeClockDiscontinuityRevision = 0;
+    int _startupAltitudeComponentId = 0, _startupAltitudeFirmwareType = -1, _startupAltitudeVehicleType = -1;
+    bool _startupAltitudeEverObservedRawFrame = false, _startupAltitudeExhausted = false, _startupAltitudeRemoving = false;
+    bool _startupAltitudeRawSampleObserved = false, _startupAltitudeClockDiscontinuityObserved = false;
+    bool _startupAltitudeLinkHooksReady = false;
+    struct FleetStartupAltitudeMonitor {
+        QVariantMap context;
+        QString reason;
+        QString sourceEpoch, flightEpoch, altitudeEpoch, coordinateEpoch;
+        WeakLinkInterfacePtr primary;
+        quint64 clockRevision = 0, homeRiskRevision = 0;
+        quint64 baselineReceipt = 0, frameCount = 0;
+        qint64 maximumGapMs = -1, lastReceivedAtMs = -1, endedAtMs = -1;
+        bool required = false, bound = false, violation = false, retired = false;
+    };
+    FleetStartupAltitudeMonitor _fleetStartupAltitude;
+    QPointer<FleetMissionStartupTransaction> _fleetStartupOwner;
+    QPointer<LinkInterface> _fleetStartupLink;
+    QMetaObject::Connection _fleetStartupOwnerDestroyedConnection;
+    QString _fleetStartupId, _fleetStartupStepId, _fleetStartupOwnerEpoch, _fleetStartupVersionEpoch, _fleetStartupFlightEpoch;
+    QString _fleetStartupWireHash, _fleetStartupCloseReason;
+    QString _fleetStartupJournalStepId;
+    QString _fleetStartupEstimatorSourceEpoch;
+    qint64 _fleetStartupEstimatorMaximumGapMs = -1;
+    struct FleetStartupEstimatorIngress {
+        QPointer<FleetMissionStartupTransaction> owner;
+        QString startupId, ownerEpoch, journalStepId, operationId;
+        QString versionEpoch, flightEpoch, healthEpoch;
+    };
+    struct FleetStartupRawIngress {
+        QPointer<FleetMissionStartupTransaction> owner;
+        QPointer<LinkInterface> primary;
+        QPointer<MAVLinkProtocol> protocol;
+        QString startupId, ownerEpoch, journalStepId, operationId;
+        QString versionEpoch, flightEpoch, healthEpoch;
+        int vehicleId = 0, componentId = 0;
+        qint64 receivedAtMs = -1;
+        QVariant issuedAtMs;
+        quint64 rawSequence = 0;
+        bool eligible = false;
+    };
+    FleetStartupStep _fleetStartupStep = FleetStartupStep::Seq0;
+    quint64 _fleetStartupNextOperation = 0, _fleetStartupOperation = 0, _fleetStartupRawReceiptSequence = 0;
+    quint64 _fleetStartupBaselineReceipt = 0, _fleetStartupReceiveDepth = 0;
+    qint64 _fleetStartupIssuedAtMs = -1, _fleetStartupExpiresAtMs = -1;
+    bool _fleetStartupExhausted = false, _fleetStartupEntryBusy = false, _fleetStartupActive = false;
+    bool _fleetStartupRequestIssued = false, _fleetStartupClosed = true;
+    bool _fleetStartupScopeCancelled = false;
+    bool _fleetStartupQueueInProgress = false;
+    // Covers only the native deployment packet fence/plugin/queue stack.
+    // It is not a remote-idle observation or a flight-start permission.
+    bool _fleetDeploymentSendBusy = false;
+    // Frozen from the actual transaction's reviewed policy, never a caller
+    // flag. ODOMETRY remains conditional on the existing motion policy;
+    // ESTIMATOR_STATUS is independent of the original six flight channels.
+    bool _fleetStartupOdometryContinuityRequired = false;
+    QVariantMap _fleetStartupQueueFlightObservation, _fleetStartupQueueCoordinateObservation, _fleetStartupQueueEstimatorObservation;
+    QMap<QString, QVariantMap> _fleetStartupRetainedReceipts;
+    QMap<QString, QMap<QString, qint64>> _fleetStartupRawLastAt;
+    QMap<QString, qint64> _fleetStartupMaximumRawGap;
+    QMap<QString, qint64> _fleetStartupHistoryEndedAt;
+    QMap<QString, QString> _fleetStartupLastRiskHash;
+    quint64 _fleetStartupJournalSequence = 0;
+    quint64 _flightStateObservationReceiveDepth = 0;
+    bool _flightStateObservationExhausted = false;
     bool            _receivingAttitudeQuaternion = false;
     CheckList       _checkListState                         = CheckListNotSetup;
     bool            _readyToFlyAvailable                    = false;
@@ -1211,10 +1911,11 @@ private:
     bool                _initialPlanRequestComplete = false;
 
     LinkManager*                    _linkManager                    = nullptr;
-    ParameterManager*               _parameterManager               = nullptr;
+    QPointer<ParameterManager>      _parameterManager;
     FirmwarePluginManager*          _firmwarePluginManager          = nullptr;
     JoystickManager*                _joystickManager                = nullptr;
     ComponentInformationManager*    _componentInformationManager    = nullptr;
+    bool                            _componentInformationCallbacksRetired = false;
     VehicleObjectAvoidance*         _objectAvoidance                = nullptr;
     Autotune*                       _autotune                       = nullptr;
 
@@ -1249,6 +1950,13 @@ private:
     int                         _flowImageIndex = 0;
 
     bool _allLinksRemovedSent = false; ///< true: allLinkRemoved signal already sent one time
+
+    // Expected identities for the three initial plan reads.  The old
+    // no-argument slots remain as explicit skip paths used by the initial
+    // connection state machine; manager completions must match these IDs.
+    quint64 _initialMissionLoadOperationId = 0;
+    quint64 _initialGeoFenceLoadOperationId = 0;
+    quint64 _initialRallyPointLoadOperationId = 0;
 
     uint                _messagesReceived = 0;
     uint                _messagesSent = 0;
@@ -1329,19 +2037,27 @@ private:
     WaitForMavlinkMessageResultHandler  _waitForMavlinkMessageResultHandler     = nullptr;
     void*                               _waitForMavlinkMessageResultHandlerData = nullptr;
 
-    void _waitForMavlinkMessageMessageReceived(const mavlink_message_t& message);
+    void _waitForMavlinkMessageMessageReceived(const mavlink_message_t& message, LinkInterface* sourceLink);
 
     // requestMessage handling
+    struct MavCommandListEntry;
     typedef struct RequestMessageInfo {
-        Vehicle*                    vehicle             = nullptr;
+        QPointer<Vehicle>           vehicle;
         int                         msgId;
         int                         compId;
         RequestMessageResultHandler resultHandler;
         void*                       resultHandlerData;
         bool                        commandAckReceived  = false; // We keep track of the ack/message being received since the order in which this will come in is random
-        bool                        messageReceived     = false;    // We only delete the allocated RequestMessageInfo_t when both happen (or the message wait times out)
-        mavlink_message_t           message;
+        bool                        messageReceived     = false;    // Shared context lives through both terminal paths and any active callback.
+        bool                        resultPublished     = false;
+        bool                        ownerRequired       = false;
+        QPointer<QObject>           callbackOwner;
+        QString                     requestId;
+        float                       requestedMessageParameter = 0;
+        std::shared_ptr<MavCommandListEntry> source;
+        mavlink_message_t           message{};
     } RequestMessageInfo_t;
+    std::shared_ptr<RequestMessageInfo_t> _requestMessageContext;
 
     static void _requestMessageCmdResultHandler             (void* resultHandlerData, int compId, const mavlink_command_ack_t& ack, MavCmdResultFailureCode_t failureCode);
     static void _requestMessageWaitForMessageResultHandler  (void* resultHandlerData, bool noResponsefromVehicle, const mavlink_message_t& message);
@@ -1364,9 +2080,130 @@ private:
         int                     tryCount            = 0;
         QElapsedTimer           elapsedTimer;
         int                     ackTimeoutMSecs     = _mavCommandAckTimeoutMSecs;
+        bool                    fleetEvidenceReadOnly = false;
+        QPointer<LinkInterface> fleetEvidenceLink;
+        QString                 fleetEvidenceEpoch;
+        QString                 fleetEvidenceRequestId;
+        std::function<bool()>   fleetEvidenceAuthorizationFence;
+        // One Vehicle-level lane for 510/511/512 and tagged native camera
+        // actions across components. Legacy camera STOP->START stays legacy.
+        // The old names remain native-only, never a wire operation token.
+        QString                 messageIntervalRequestId;
+        QString                 messageIntervalSourceEpoch;
+        QString                 messageCommandTransportEpoch;
+        int                     messageCommandVehicleId = 0, messageCommandDefaultComponentId = 0;
+        int                     messageCommandFirmwareType = -1, messageCommandVehicleType = -1;
+        QPointer<VehicleLinkManager> messageIntervalLinks;
+        QPointer<MAVLinkProtocol> messageIntervalProtocol;
+        QPointer<FirmwarePlugin> messageIntervalPlugin;
+        QPointer<LinkInterface> messageIntervalPrimary;
+        WeakLinkInterfacePtr    messageIntervalPrimaryOwner;
+        quint64                 messageCommandSerial = 0;
+        qint64                  messageCommandReservedAtMs = -1;
+        qint64                  messageCommandDeadlineMs = -1;
+        bool                    messageIntervalMutationReserved = false;
+        bool                    messageCommandWriteStarted = false;
+        bool                    messageCommandPrepared = false;
+        bool                    messageCommandProgressSeen = false;
+        bool                    fleetMessageIntervalQuery = false;
+        QString                 fleetOptionalTelemetryConfigurationRunId;
+        QString                 fleetCameraStreamCaptureRunId;
+        QString                 fleetCameraStreamControlRunId;
     } MavCommandListEntry_t;
 
+    struct FleetMessageIntervalQuery {
+        QPointer<QObject> owner;
+        MavCommandListEntry_t source;
+        QPointer<ParameterManager> parameters;
+        QString parameterEpoch;
+        std::function<bool()> authorizationFence;
+        int messageId = 0;
+        qint64 originalDeadlineMs = -1;
+        quint64 versionRevision = 0, mutationGeneration = 0;
+        quint64 baselineReceiptSequence = 0, receiptSequence = 0, contentRevision = 0;
+        QString ledgerEpoch;
+        bool ledgerBound = false, active = true, requestIssued = false;
+        bool ackObserved = false, reportObserved = false, authorizationBusy = false;
+        bool configurationSealed = false;
+        int ackResult = -1, intervalUs = 0;
+        QString state = QStringLiteral("waiting-ack-and-report"), reason = QStringLiteral("");
+    };
+    QList<std::shared_ptr<FleetMessageIntervalQuery>> _fleetMessageIntervalQueries;
+    std::shared_ptr<FleetLinkLatencyRun> _fleetLinkLatencyRun;
+    std::shared_ptr<FleetCameraStreamRun> _fleetCameraStreamRun;
+    std::shared_ptr<FleetCameraStreamControlRun> _fleetCameraStreamControlRun;
+    bool _fleetCameraStreamControlOriginCurrent(const std::shared_ptr<FleetCameraStreamControlBasis>& basis) const;
+    bool _fleetCameraStreamControlBasisMemoryCurrent(const std::shared_ptr<FleetCameraStreamControlBasis>& basis,
+        quint64 expectedMutation, bool requireOriginalStatus) const;
+    bool _fleetCameraStreamControlSourceCurrent(const std::shared_ptr<FleetCameraStreamControlRun>& run, bool requireQuiescent) const;
+    bool _fleetCameraStreamControlAllowed(const std::shared_ptr<FleetCameraStreamControlRun>& run);
+    bool _advanceFleetCameraStreamMutation(const std::shared_ptr<FleetCameraStreamControlRun>& ownRun);
+    void _finishFleetCameraStreamControl(const std::shared_ptr<FleetCameraStreamControlRun>& run,
+        const QString& state, const QString& reason, bool quarantine);
+    void _completeFleetCameraStreamControlQuery(const std::shared_ptr<FleetCameraStreamControlRun>& run);
+    void _observeFleetCameraStreamControl(const std::shared_ptr<FleetCameraStreamControlRun>& run,
+        const QString& originalRequestId, bool originalIssued, quint64 originalBaseline,
+        const mavlink_message_t& original, LinkInterface* sourceLink);
+    static QVariantMap _fleetCameraStreamControlValue(const std::shared_ptr<FleetCameraStreamControlRun>& run,
+        bool current, qint64 now, qint64 sampleNow, bool retired);
+    bool _fleetCameraStreamRunSourceCurrent(const std::shared_ptr<FleetCameraStreamRun>& run, bool requireQuiescent) const;
+    bool _fleetCameraStreamRunAllowed(const std::shared_ptr<FleetCameraStreamRun>& run);
+    void _finishFleetCameraStreamCapture(const std::shared_ptr<FleetCameraStreamRun>& run,
+        const QString& state, const QString& reason, bool quarantine);
+    void _completeFleetCameraStreamQuery(const std::shared_ptr<FleetCameraStreamRun>& run);
+    void _observeFleetCameraStreamCapture(const std::shared_ptr<FleetCameraStreamRun>& run, int originalStage,
+        const QString& originalRequestId, bool originalIssued, quint64 originalBaseline,
+        const QString& originalEpoch, const mavlink_message_t& original, LinkInterface* sourceLink);
+    static QVariantMap _fleetCameraStreamCaptureValue(const std::shared_ptr<FleetCameraStreamRun>& run,
+        bool current, qint64 now, qint64 sampleNow, bool retired);
+    bool _fleetLinkLatencySourceCurrent(const std::shared_ptr<FleetLinkLatencyRun>& run, bool requireQuiescent) const;
+    bool _fleetLinkLatencyAllowed(const std::shared_ptr<FleetLinkLatencyRun>& run);
+    static QVariantMap _fleetLinkLatencyValue(const std::shared_ptr<FleetLinkLatencyRun>& run, bool current, bool retired);
+    void _retireFleetLinkLatencyCapture(const QString& reason);
+    void _observeFleetLinkLatencyCapture(const std::shared_ptr<FleetLinkLatencyRun>& run,
+        const mavlink_message_t& original, LinkInterface* originalLink, qint64 receivedAtNs, bool originalWriteStarted);
+    std::shared_ptr<FleetMessageIntervalQuery> _fleetMessageIntervalActiveQuery;
+    quint64 _fleetMessageIntervalRawReceiveDepth = 0;
+    bool _fleetMessageIntervalRawReceiveExhausted = false;
+    std::shared_ptr<FleetOptionalTelemetryConfigurationRun> _fleetOptionalTelemetryConfigurationRun;
+    bool _fleetOptionalTelemetryBasisMemoryCurrent(
+        const std::shared_ptr<FleetOptionalTelemetryConfigurationBasis>& basis, bool requireRows) const;
+    bool _fleetOptionalTelemetryOriginCurrent(const std::shared_ptr<FleetOptionalTelemetryConfigurationBasis>& basis) const;
+    bool _fleetOptionalTelemetryRunSourceCurrent(
+        const std::shared_ptr<FleetOptionalTelemetryConfigurationRun>& run, bool requireQuiescent) const;
+    bool _fleetOptionalTelemetryRunAllowed(const std::shared_ptr<FleetOptionalTelemetryConfigurationRun>& run);
+    void _finishFleetOptionalTelemetryConfiguration(const std::shared_ptr<FleetOptionalTelemetryConfigurationRun>& run,
+        const QString& state, const QString& reason, bool quarantine);
+    QVariantMap _beginFleetMessageIntervalQuery(QObject* actualOwner, LinkInterface* expectedPrimary,
+        int messageId, std::function<bool()> authorizationFence, const QString& configurationRunId);
+    QPointer<InitialConnectStateMachine> _fleetIntervalQueryInitialConnect;
+    QPointer<MissionManager> _fleetIntervalQueryMission;
+    QPointer<GeoFenceManager> _fleetIntervalQueryFence;
+    QPointer<RallyPointManager> _fleetIntervalQueryRally;
+    bool _fleetMessageIntervalQuerySourceCurrent(const std::shared_ptr<FleetMessageIntervalQuery>& query,
+        bool requireQuiescent) const;
+    bool _fleetMessageIntervalQueryAllowed(const std::shared_ptr<FleetMessageIntervalQuery>& query);
+    QVariantMap _fleetMessageIntervalQueryValue(const std::shared_ptr<FleetMessageIntervalQuery>& query,
+        const QString& unavailableReason = QStringLiteral("fleet-interval-query-unavailable")) const;
+    static QVariantMap _fleetMessageIntervalQueryRetiredValue(const std::shared_ptr<FleetMessageIntervalQuery>& query);
+    void _finishFleetMessageIntervalQuery(const std::shared_ptr<FleetMessageIntervalQuery>& query,
+        const QString& state, const QString& reason, bool quarantine);
+    void _observeFleetMessageIntervalQuery(const std::shared_ptr<FleetMessageIntervalQuery>& query,
+        const mavlink_message_t& original, LinkInterface* sourceLink);
+
     QList<MavCommandListEntry_t>    _mavCommandList;
+    // COMMAND_ACK does not echo a ground-station operation ID. Keep a short
+    // per-command quarantine after a no-response timeout so a delayed
+    // ACK cannot be consumed by an immediately re-issued command. This is a
+    // conservative compatibility guard, not a protocol-level token.
+    QMap<quint64, qint64>           _mavCommandQuarantine;
+    QElapsedTimer                   _mavCommandQuarantineClock;
+    QString                         _messageCommandLaneId;
+    QString                         _messageCommandTransportEpoch;
+    QString                         _messageCommandDispatchingId;
+    quint64                         _messageCommandLaneSerial = 0;
+    qint64                          _messageCommandLaneDeadlineMs = -1, _messageCommandQuarantineUntilMs = -1;
+    bool                            _messageCommandLaneRetired = false, _messageCommandLaneExhausted = false;
     QTimer                          _mavCommandResponseCheckTimer;
     static const int                _mavCommandMaxRetryCount                = 3;
     static const int                _mavCommandResponseCheckTimeoutMSecs    = 500;
@@ -1378,10 +2215,67 @@ private:
             const MavCmdAckHandlerInfo_t* ackHandlerInfo,   ///> nullptr to signale no handlers
             int compId, MAV_CMD command, MAV_FRAME frame, 
             float param1, float param2, float param3, float param4, double param5, double param6, float param7);
-    void _sendMavCommandFromList(int index);
+    void _sendMavCommandFromList(int index, bool* fleetReadIssued = nullptr);
     int  _findMavCommandListEntryIndex(int targetCompId, MAV_CMD command);
+    quint64 _mavCommandQuarantineKey(int targetCompId, MAV_CMD command) const;
+    void _purgeMavCommandQuarantine(qint64 now = -1);
+    bool _isMavCommandQuarantined(int targetCompId, MAV_CMD command);
+    void _quarantineMavCommand(int targetCompId, MAV_CMD command, int ackTimeoutMSecs);
+    bool _messageIntervalSourceCurrent(const MavCommandListEntry_t& entry) const;
+    bool _messageCommandSourceMemoryCurrent(const MavCommandListEntry_t& entry) const;
+    bool _sendMessageIntervalCommand(const MavCommandListEntry_t& entry, mavlink_message_t message);
+    bool _reserveMessageCommand(MavCommandListEntry_t* entry);
+    void _releaseMessageCommand(const QString& requestId);
+    int _messageCommandIndex(const QString& requestId) const;
+    void _finishMessageCommand(const QString& requestId, const mavlink_command_ack_t& ack, MavCmdResultFailureCode_t failure);
+    void _showMessageCommandFailure(const MavCommandListEntry_t& entry, const mavlink_command_ack_t& ack,
+        MavCmdResultFailureCode_t failure);
+    void _sendMessageCommandWorker(bool commandInt, bool showError, const MavCmdAckHandlerInfo_t* handler,
+        int componentId, MAV_CMD command, MAV_FRAME frame, float p1, float p2, float p3, float p4,
+        double p5, double p6, float p7);
+    void _sendMessageCommandFromList(const QString& requestId, bool* fleetReadIssued);
+    void _finishRequestMessage(std::shared_ptr<RequestMessageInfo_t> context, MAV_RESULT result,
+        RequestMessageResultHandlerFailureCode_t failure, const mavlink_message_t& message);
+    void _checkMessageCommandDeadline();
+    void _handleMessageCommandAck(const mavlink_message_t& original, LinkInterface* sourceLink);
     bool _sendMavCommandShouldRetry(MAV_CMD command);
     bool _commandCanBeDuplicated(MAV_CMD command);
+    bool _fleetEvidenceReadAllowed(LinkInterface* expectedLink, bool ownVersionCommand = false,
+                                  QString* reason = nullptr) const;
+    bool _sendFleetEvidenceReadMessage(LinkInterface* expectedLink, mavlink_message_t message,
+                                      bool ownVersionCommand, std::function<bool()> authorizationFence,
+                                      bool* requestIssued = nullptr);
+    bool _fleetMissionReadAllowed(PlanManager* manager, LinkInterface* expectedLink,
+                                  const QString& readScopeId, QString* reason = nullptr) const;
+    bool _fleetMissionDiagnosticReadAllowed(PlanManager* manager, LinkInterface* expectedLink,
+                                          const QString& readScopeId, QString* reason = nullptr) const;
+    bool _fleetMissionArmedGroundReviewReadAllowed(PlanManager* manager, LinkInterface* expectedLink,
+        const QString& readScopeId, bool expectedArmed, QString* reason = nullptr) const;
+    bool _sendFleetMissionReadMessage(PlanManager* manager, LinkInterface* expectedLink,
+                                      const QString& readScopeId, mavlink_message_t message,
+                                      std::function<bool()> authorizationFence, bool* requestIssued);
+    bool _sendFleetDeploymentMessage(PlanManager* actualManager, LinkInterface* expectedPrimary,
+        mavlink_message_t message, std::function<bool()> authorizationFence, bool* requestIssued);
+    void _invalidateStartupCoordinates();
+    quint64 _prepareStartupCoordinateObservation(const mavlink_message_t& original, LinkInterface* link,
+        QString* channel, QVariantMap* value);
+    void _completeStartupCoordinateObservation(const QString& channel, quint64 token, const QString& epoch,
+        const QVariantMap& value, const mavlink_message_t& original, LinkInterface* link, qint64 receivedAtMs);
+    void _invalidateStartupOdometry(const QString& source);
+    quint64 _prepareStartupOdometryObservation(const mavlink_message_t& original, LinkInterface* link, QVariantMap* value);
+    void _completeStartupOdometryObservation(quint64 token, const QString& epoch, const QVariantMap& value,
+        const mavlink_message_t& original, LinkInterface* link, qint64 receivedAtMs);
+    bool _fleetStartupTransportCurrent(bool requireQuiescent) const;
+    bool _fleetStartupRawIngressSame(const FleetStartupRawIngress& ingress) const;
+    void _discardFleetStartupRawIngress(const FleetStartupRawIngress& ingress);
+    bool _handleFleetStartupRawMessage(const mavlink_message_t& original, LinkInterface* link,
+        const FleetStartupRawIngress& ingress);
+    void _handleFleetStartupEstimatorRawMessage(const mavlink_message_t& original, LinkInterface* link,
+        qint64 receivedAtMs, const FleetStartupEstimatorIngress& ingress, quint64 healthToken, const QString& healthEpoch);
+    void _closeFleetStartupStep(const QString& reason);
+    void _snapshotFleetStartupStep();
+    static void _fleetEvidenceCommandResult(void*, int, const mavlink_command_ack_t&, MavCmdResultFailureCode_t);
+    void _quarantineFleetEvidenceCommand(const MavCommandListEntry_t& entry);
 
     QMap<uint8_t /* batteryId */, uint8_t /* MAV_BATTERY_CHARGE_STATE_OK */> _lowestBatteryChargeStateAnnouncedMap;
 

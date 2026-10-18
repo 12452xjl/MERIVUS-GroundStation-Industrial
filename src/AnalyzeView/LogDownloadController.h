@@ -16,6 +16,9 @@
 #include <QAbstractListModel>
 #include <QLocale>
 #include <QElapsedTimer>
+#include <QDateTime>
+#include <QPointer>
+#include "LinkInterface.h"
 
 #include <memory>
 
@@ -27,6 +30,10 @@ class  UASInterface;
 class  Vehicle;
 class  QGCLogEntry;
 struct LogDownloadData;
+struct LogDownloadRun;
+class MAVLinkProtocol;
+class QGCToolbox;
+class VehicleLinkManager;
 
 Q_DECLARE_LOGGING_CATEGORY(LogDownloadLog)
 
@@ -43,9 +50,10 @@ public:
     QGCLogModel(QObject *parent = nullptr);
 
     Q_PROPERTY(int count READ count NOTIFY countChanged)
-    Q_INVOKABLE QGCLogEntry* get(int index);
+    Q_INVOKABLE QGCLogEntry* get(int index) const;
 
     int         count           (void) const;
+    bool        mutationInProgress() const { return _changing; }
     void        append          (QGCLogEntry* entry);
     void        clear           (void);
     QGCLogEntry*operator[]      (int i);
@@ -59,7 +67,8 @@ signals:
 protected:
     QHash<int, QByteArray> roleNames() const;
 private:
-    QList<QGCLogEntry*> _logEntries;
+    QList<QPointer<QGCLogEntry>> _logEntries;
+    bool _changing = false;
 };
 
 //-----------------------------------------------------------------------------
@@ -115,6 +124,7 @@ class LogDownloadController : public QObject
 
 public:
     LogDownloadController(void);
+    ~LogDownloadController() override;
 
     Q_PROPERTY(QGCLogModel* model           READ model              NOTIFY modelChanged)
     Q_PROPERTY(bool         requestingList  READ requestingList     NOTIFY requestingListChanged)
@@ -139,38 +149,42 @@ signals:
 
 private slots:
     void _setActiveVehicle  (Vehicle* vehicle);
-    void _logEntry          (UASInterface *uas, uint32_t time_utc, uint32_t size, uint16_t id, uint16_t num_logs, uint16_t last_log_num);
-    void _logData           (UASInterface *uas, uint32_t ofs, uint16_t id, uint8_t count, const uint8_t *data);
+    void _mavlinkMessageReceived(LinkInterface* link, mavlink_message_t message);
     void _processDownload   ();
 
 private:
-    bool _entriesComplete   ();
-    bool _chunkComplete     () const;
-    bool _logComplete       () const;
-    void _findMissingEntries();
-    void _receivedAllEntries();
-    void _receivedAllData   ();
-    void _resetSelection    (bool canceled = false);
-    void _findMissingData   ();
-    void _requestLogList    (uint32_t start, uint32_t end);
-    void _requestLogData    (uint16_t id, uint32_t offset, uint32_t count, int retryCount = 0);
-    bool _prepareLogDownload();
-    void _setDownloading    (bool active);
-    void _setListing        (bool active);
-    void _updateDataRate    ();
+    std::shared_ptr<LogDownloadRun> _makeRun(bool listing);
+    bool _sourceCurrent(const std::shared_ptr<LogDownloadRun>& run) const;
+    bool _runCurrent(const std::shared_ptr<LogDownloadRun>& run) const;
+    bool _entryInModel(QGCLogEntry* entry) const;
+    bool _entryCurrent(const std::shared_ptr<LogDownloadData>& data) const;
+    void _retireSource();
+    void _finishRun(const std::shared_ptr<LogDownloadRun>& run, const QString& status,
+                    bool catalogComplete = false, bool sendEnd = true);
+    bool _send(const std::shared_ptr<LogDownloadRun>& run, const mavlink_message_t& message);
+    void _requestLogList(const std::shared_ptr<LogDownloadRun>& run, uint16_t start, uint16_t end);
+    void _requestLogData(const std::shared_ptr<LogDownloadRun>& run, uint32_t offset, uint32_t count);
+    void _handleLogEntry(const std::shared_ptr<LogDownloadRun>& run, const mavlink_log_entry_t& entry);
+    void _handleLogData(const std::shared_ptr<LogDownloadRun>& run, const mavlink_log_data_t& data);
+    void _startNextFile(const std::shared_ptr<LogDownloadRun>& run);
+    void _findMissing(const std::shared_ptr<LogDownloadRun>& run);
+    void _setActivity(bool listing, bool downloading);
+    void _rejectSelected(const QString& reason);
 
-    QGCLogEntry* _getNextSelected();
-
-    UASInterface*       _uas;
-    LogDownloadData*    _downloadData;
+    QPointer<MultiVehicleManager> _manager;
+    QPointer<MAVLinkProtocol> _protocol;
+    QPointer<QGCToolbox> _toolbox;
+    QPointer<Vehicle>    _vehicle;
+    QPointer<VehicleLinkManager> _activeLinks;
+    QList<QMetaObject::Connection> _sourceConnections;
+    std::shared_ptr<LogDownloadRun> _run, _catalog;
     QTimer              _timer;
     QGCLogModel         _logEntriesModel;
-    Vehicle*            _vehicle;
-    bool                _requestingLogEntries;
-    bool                _downloadingLogs;
-    int                 _retries;
-    int                 _apmOneBased;
-    QString             _downloadPath;
+    quint64             _sourceSerial = 0;
+    bool                _busy = false, _destroying = false;
+    bool                _modelClearPending = false;
+    bool                _requestingLogEntries = false;
+    bool                _downloadingLogs = false;
 };
 
 #endif

@@ -11,6 +11,8 @@
 
 #include <QObject>
 #include <QList>
+#include <QPointer>
+#include <memory>
 
 #include "AutoPilotPlugin.h"
 #include "UASInterface.h"
@@ -100,21 +102,30 @@ public:
     Q_PROPERTY(bool                 diffOtherVehicle        MEMBER _diffOtherVehicle        NOTIFY diffOtherVehicleChanged)
     Q_PROPERTY(bool                 diffMultipleComponents  MEMBER _diffMultipleComponents  NOTIFY diffMultipleComponentsChanged)
     Q_PROPERTY(QmlObjectListModel*  diffList                READ diffList                   CONSTANT)
+    Q_PROPERTY(QString              diffError               READ diffError                  NOTIFY diffErrorChanged)
+    Q_PROPERTY(QString              diffToken               READ diffToken                  NOTIFY diffTokenChanged)
+    Q_PROPERTY(QVariantMap          parameterImportState    READ parameterImportState       NOTIFY parameterImportChanged)
 
     Q_INVOKABLE QStringList searchParameters(const QString& searchText, bool searchInName=true, bool searchInDescriptions=true);
 
     Q_INVOKABLE void saveToFile                     (const QString& filename);
     Q_INVOKABLE bool buildDiffFromFile              (const QString& filename);
-    Q_INVOKABLE void clearDiff                      (void);
-    Q_INVOKABLE void sendDiff                       (void);
+    Q_INVOKABLE void clearDiff                      (const QString& expectedToken);
+    Q_INVOKABLE bool sendDiff                       (const QString& expectedToken);
+    Q_INVOKABLE bool cancelParameterImport          (const QString& runId);
     Q_INVOKABLE void refresh                        (void);
-    Q_INVOKABLE void resetAllToDefaults             (void);
-    Q_INVOKABLE void resetAllToVehicleConfiguration (void);
+    Q_INVOKABLE bool resetAllToDefaults             (void);
+    Q_INVOKABLE bool resetAllToVehicleConfiguration (void);
+    Q_INVOKABLE bool writeAllowed                   (void) const;
+    Q_INVOKABLE QString writeBlockReason            (void) const;
 
     QObject*            currentCategory     (void) { return _currentCategory; }
     QObject*            currentGroup        (void) { return _currentGroup; }
     QmlObjectListModel* categories          (void) { return &_categories; }
     QmlObjectListModel* diffList            (void) { return &_diffList; }
+    QString             diffError           (void) const { return _diffError; }
+    QString             diffToken           (void) const { return _diffToken; }
+    QVariantMap         parameterImportState (void) const;
     void                setCurrentCategory  (QObject* currentCategory);
     void                setCurrentGroup     (QObject* currentGroup);
 
@@ -126,6 +137,9 @@ signals:
     void diffOtherVehicleChanged        (bool diffOtherVehicle);
     void diffMultipleComponentsChanged  (bool diffMultipleComponents);
     void parametersChanged              (void);
+    void diffErrorChanged               (void);
+    void diffTokenChanged               (void);
+    void parameterImportChanged         (void);
 
 private slots:
     void _currentCategoryChanged(void);
@@ -137,15 +151,26 @@ private slots:
 
 private:
     bool _shouldShow(Fact *fact) const;
+    QString _writeBlockReason(void) const;
+    struct FilePreview;
+    std::shared_ptr<FilePreview> _captureFilePreview();
+    bool _filePreviewCurrent(const std::shared_ptr<FilePreview>& preview) const;
+    bool _clearDiffPrivate();
+    bool _diffFailure(const QString& error);
 
 private:
-    ParameterManager*           _parameterMgr           = nullptr;
+    QPointer<ParameterManager>  _parameterMgr;
     QString                     _searchText;
     ParameterEditorCategory*    _currentCategory        = nullptr;
     ParameterEditorGroup*       _currentGroup           = nullptr;
     bool                        _showModifiedOnly       = false;
     bool                        _diffOtherVehicle       = false;
     bool                        _diffMultipleComponents = false;
+    int                         _diffVehicleId          = -1;
+    QString                     _diffError;
+    QString                     _diffToken;
+    bool                        _diffBusy               = false;
+    std::shared_ptr<FilePreview> _filePreview;
 
     QmlObjectListModel          _categories;
     QmlObjectListModel          _diffList;

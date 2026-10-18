@@ -49,6 +49,15 @@ public:
      */
     QString insert(const QString &fileTag, const QString& fileName);
 
+    /**
+     * Invalidate only the exact tag's data and metadata files. The caller must
+     * own this non-thread-safe cache. Tags are ASCII [A-Za-z0-9_-], 1..128.
+     * All in-memory references to this tag are retired even on a partial
+     * failure. True confirms both actual remove calls succeeded; an already
+     * missing file is not inferred from an exists() check and returns false.
+     */
+    bool invalidate(const QString& fileTag);
+
 private:
 
     static constexpr const char* _metaExtension = ".meta";

@@ -104,6 +104,8 @@ void GeoFenceController::_managerVehicleChanged(Vehicle* managerVehicle)
         _managerVehicle->parameterManager()->disconnect(this);
         _managerVehicle = nullptr;
         _geoFenceManager = nullptr;
+        _operationId = 0;
+        _operationPending = false;
     }
 
     _managerVehicle = managerVehicle;
@@ -113,10 +115,14 @@ void GeoFenceController::_managerVehicleChanged(Vehicle* managerVehicle)
     }
 
     _geoFenceManager = _managerVehicle->geoFenceManager();
-    connect(_geoFenceManager, &GeoFenceManager::loadComplete,                   this, &GeoFenceController::_managerLoadComplete);
-    connect(_geoFenceManager, &GeoFenceManager::sendComplete,                   this, &GeoFenceController::_managerSendComplete);
-    connect(_geoFenceManager, &GeoFenceManager::removeAllComplete,              this, &GeoFenceController::_managerRemoveAllComplete);
+    connect(_geoFenceManager, &PlanManager::operationStarted,                    this, &GeoFenceController::_managerOperationStarted);
+    connect(_geoFenceManager, &PlanManager::newMissionItemsAvailableWithOperationId, this, &GeoFenceController::_managerLoadCompleteWithOperationId);
+    connect(_geoFenceManager, &PlanManager::sendCompleteWithOperationId,          this, &GeoFenceController::_managerSendCompleteWithOperationId);
+    connect(_geoFenceManager, &PlanManager::removeAllCompleteWithOperationId,     this, &GeoFenceController::_managerRemoveAllCompleteWithOperationId);
     connect(_geoFenceManager, &GeoFenceManager::inProgressChanged,              this, &GeoFenceController::syncInProgressChanged);
+
+    _operationId = _geoFenceManager->activeOperationId();
+    _operationPending = _operationId != 0;
 
     //-- GeoFenceController::supported() tests both the capability bit AND the protocol version.
     connect(_managerVehicle,  &Vehicle::capabilityBitsChanged,                  this, &GeoFenceController::supportedChanged);
@@ -357,6 +363,24 @@ void GeoFenceController::_managerLoadComplete(void)
     _itemsRequested = false;
 }
 
+void GeoFenceController::_managerOperationStarted(quint64 operationId, int transactionType)
+{
+    Q_UNUSED(transactionType)
+    _operationId = operationId;
+    _operationPending = operationId != 0;
+}
+
+void GeoFenceController::_managerLoadCompleteWithOperationId(quint64 operationId, bool removeAllRequested)
+{
+    Q_UNUSED(removeAllRequested)
+    if (!_operationPending || operationId == 0 || operationId != _operationId) {
+        qCDebug(GeoFenceControllerLog) << "GeoFenceController ignored stale load completion" << operationId << _operationId;
+        return;
+    }
+    _operationPending = false;
+    _managerLoadComplete();
+}
+
 void GeoFenceController::_managerSendComplete(bool error)
 {
     // Fly view always reloads on manager sendComplete
@@ -365,12 +389,32 @@ void GeoFenceController::_managerSendComplete(bool error)
     }
 }
 
+void GeoFenceController::_managerSendCompleteWithOperationId(quint64 operationId, bool error)
+{
+    if (!_operationPending || operationId == 0 || operationId != _operationId) {
+        qCDebug(GeoFenceControllerLog) << "GeoFenceController ignored stale send completion" << operationId << _operationId;
+        return;
+    }
+    _operationPending = false;
+    _managerSendComplete(error);
+}
+
 void GeoFenceController::_managerRemoveAllComplete(bool error)
 {
     if (!error) {
         // Remove all from vehicle so we always update
         showPlanFromManagerVehicle();
     }
+}
+
+void GeoFenceController::_managerRemoveAllCompleteWithOperationId(quint64 operationId, bool error)
+{
+    if (!_operationPending || operationId == 0 || operationId != _operationId) {
+        qCDebug(GeoFenceControllerLog) << "GeoFenceController ignored stale remove-all completion" << operationId << _operationId;
+        return;
+    }
+    _operationPending = false;
+    _managerRemoveAllComplete(error);
 }
 
 bool GeoFenceController::containsItems(void) const

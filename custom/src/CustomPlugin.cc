@@ -30,16 +30,58 @@
 #include "FaultToleranceManager.h"
 #include "FormationPlanner.h"
 #include "FleetExtensionRegistry.h"
+#include "FleetAutonomyPolicy.h"
 #include "FleetCapabilityMatcher.h"
 #include "FleetRegistry.h"
+#include "FleetHealthCenter.h"
+#include "FleetCapabilityDiscovery.h"
+#include "FleetEventRuleEngine.h"
+#include "FleetAirspaceConflictChecker.h"
+#include "FleetMissionCompiler.h"
+#include "FleetMissionPlanStore.h"
+#include "FleetMissionDraft.h"
+#include "FleetMissionDraftStore.h"
+#include "FleetMissionDeployment.h"
+#include "FleetMissionDeploymentLifecycle.h"
+#include "FleetMissionDeploymentEpisode.h"
+#include "FleetMissionStartReview.h"
+#include "FleetRoleAllocator.h"
+#include "FleetEnergyScheduler.h"
+#include "FleetMaintenancePassport.h"
+#include "FleetLinkDegradationPolicy.h"
+#include "FleetMissionRiskEvaluator.h"
+#include "FleetMissionReportBuilder.h"
+#include "FleetMissionExecutionReport.h"
+#include "FleetMissionRemainderArchive.h"
 #include "FleetRolePolicy.h"
+#include "FleetOperatorSession.h"
+#include "FleetOperationApproval.h"
+#include "FleetMissionEvidenceRefresh.h"
+#include "FleetMissionStartContentCheck.h"
+#include "FleetMissionStartApproval.h"
+#include "FleetMissionStartupAuthority.h"
+#include "FleetMissionStartupTransaction.h"
+#include "FleetMissionArmedGroundReview.h"
+#include "FleetMissionGroundStartApproval.h"
+#include "FleetMissionGroundStartupAuthority.h"
+#include "FleetMissionStartupSeries.h"
+#include "FleetMissionObservationClose.h"
 #include "FleetTaskTemplateRegistry.h"
+#include "FleetUserTaskTemplates.h"
+#include "FleetMissionReportWorkspace.h"
 #include "MissionHandoffManager.h"
 #include "SwarmMissionOrchestrator.h"
 #include "SwarmController.h"
 #include "FleetEventBlackBox.h"
+#include "FleetPersistentEventStore.h"
+#include "FleetTelemetryArchive.h"
 #include "FleetTimelineReplay.h"
 #include "FleetMissionSimulator.h"
+#include "FleetMissionDigitalTwin.h"
+#include "FleetMissionEvidenceChain.h"
+#include "FleetMissionContinuityPlanner.h"
+#include "FleetMissionReviewCoordinator.h"
+#include "FleetOperationalMemory.h"
 #include "FleetIntentTask.h"
 #include "FleetRiskRadar.h"
 
@@ -98,22 +140,71 @@ CustomPlugin::CustomPlugin(QGCApplication *app, QGCToolbox* toolbox)
     qmlRegisterType<AiAgentClient>("Merivus", 1, 0, "AiAgentClient");
     qmlRegisterType<AiServiceSupervisor>("Merivus", 1, 0, "AiServiceSupervisor");
     qmlRegisterType<MerivusLinkDiagnostics>("Merivus", 1, 0, "MerivusLinkDiagnostics");
-    qmlRegisterType<CommandTransaction>("Merivus", 1, 0, "CommandTransaction");
-    qmlRegisterType<FaultToleranceManager>("Merivus", 1, 0, "FaultToleranceManager");
-    qmlRegisterType<FormationPlanner>("Merivus", 1, 0, "FormationPlanner");
-    qmlRegisterType<FleetExtensionRegistry>("Merivus", 1, 0, "FleetExtensionRegistry");
-    qmlRegisterType<FleetCapabilityMatcher>("Merivus", 1, 0, "FleetCapabilityMatcher");
-    qmlRegisterType<FleetRegistry>("Merivus", 1, 0, "FleetRegistry");
-    qmlRegisterType<FleetRolePolicy>("Merivus", 1, 0, "FleetRolePolicy");
-    qmlRegisterType<FleetTaskTemplateRegistry>("Merivus", 1, 0, "FleetTaskTemplateRegistry");
-    qmlRegisterType<MissionHandoffManager>("Merivus", 1, 0, "MissionHandoffManager");
-    qmlRegisterType<SwarmMissionOrchestrator>("Merivus", 1, 0, "SwarmMissionOrchestrator");
-    qmlRegisterType<SwarmController>("Merivus", 1, 0, "SwarmController");
-    qmlRegisterType<FleetEventBlackBox>("Merivus", 1, 0, "FleetEventBlackBox");
-    qmlRegisterType<FleetTimelineReplay>("Merivus", 1, 0, "FleetTimelineReplay");
-    qmlRegisterType<FleetMissionSimulator>("Merivus", 1, 0, "FleetMissionSimulator");
-    qmlRegisterType<FleetIntentTask>("Merivus", 1, 0, "FleetIntentTask");
-    qmlRegisterType<FleetRiskRadar>("Merivus", 1, 0, "FleetRiskRadar");
+    // Mutable command/mission/health services are registered in a separate
+    // internal URI. GuidedActionsController is the only QML owner that
+    // imports this URI; public panels consume its read-only facades instead
+    // of being able to instantiate a second command controller or overwrite
+    // registry/approval state. This is a module boundary for the QML API,
+    // not a substitute for C++ authentication or process isolation.
+    qmlRegisterType<CommandTransaction>("MerivusInternal", 1, 0, "CommandTransaction");
+    qmlRegisterType<FaultToleranceManager>("MerivusInternal", 1, 0, "FaultToleranceManager");
+    qmlRegisterType<FormationPlanner>("MerivusInternal", 1, 0, "FormationPlanner");
+    qmlRegisterType<FleetExtensionRegistry>("MerivusInternal", 1, 0, "FleetExtensionRegistry");
+    qmlRegisterType<FleetAutonomyPolicy>("MerivusInternal", 1, 0, "FleetAutonomyPolicy");
+    qmlRegisterType<FleetCapabilityMatcher>("MerivusInternal", 1, 0, "FleetCapabilityMatcher");
+    qmlRegisterType<FleetRegistry>("MerivusInternal", 1, 0, "FleetRegistry");
+    qmlRegisterType<FleetHealthCenter>("MerivusInternal", 1, 0, "FleetHealthCenter");
+    qmlRegisterType<FleetCapabilityDiscovery>("MerivusInternal", 1, 0, "FleetCapabilityDiscovery");
+    qmlRegisterType<FleetEventRuleEngine>("MerivusInternal", 1, 0, "FleetEventRuleEngine");
+    qmlRegisterType<FleetAirspaceConflictChecker>("MerivusInternal", 1, 0, "FleetAirspaceConflictChecker");
+    qmlRegisterType<FleetMissionCompiler>("MerivusInternal", 1, 0, "FleetMissionCompiler");
+    qmlRegisterType<FleetMissionPlanStore>("MerivusInternal", 1, 0, "FleetMissionPlanStore");
+    qmlRegisterType<FleetMissionDraft>("MerivusInternal", 1, 0, "FleetMissionDraft");
+    qmlRegisterType<FleetMissionDraftStore>("MerivusInternal", 1, 0, "FleetMissionDraftStore");
+    qmlRegisterType<FleetMissionDeployment>("MerivusInternal", 1, 0, "FleetMissionDeployment");
+    qmlRegisterType<FleetMissionDeploymentLifecycle>("MerivusInternal", 1, 0, "FleetMissionDeploymentLifecycle");
+    qmlRegisterUncreatableType<FleetMissionDeploymentEpisode>("MerivusInternal", 1, 0, "FleetMissionDeploymentEpisode",
+        QStringLiteral("Deployment episodes are created and retained by FleetMissionDeploymentLifecycle."));
+    qmlRegisterType<FleetMissionStartReview>("MerivusInternal", 1, 0, "FleetMissionStartReview");
+    qmlRegisterType<FleetRoleAllocator>("MerivusInternal", 1, 0, "FleetRoleAllocator");
+    qmlRegisterType<FleetEnergyScheduler>("MerivusInternal", 1, 0, "FleetEnergyScheduler");
+    qmlRegisterType<FleetMaintenancePassport>("MerivusInternal", 1, 0, "FleetMaintenancePassport");
+    qmlRegisterType<FleetLinkDegradationPolicy>("MerivusInternal", 1, 0, "FleetLinkDegradationPolicy");
+    qmlRegisterType<FleetMissionRiskEvaluator>("MerivusInternal", 1, 0, "FleetMissionRiskEvaluator");
+    qmlRegisterType<FleetMissionReportBuilder>("MerivusInternal", 1, 0, "FleetMissionReportBuilder");
+    qmlRegisterType<FleetMissionExecutionReport>("MerivusInternal", 1, 0, "FleetMissionExecutionReport");
+    qmlRegisterType<FleetMissionRemainderArchive>("MerivusInternal", 1, 0, "FleetMissionRemainderArchive");
+    qmlRegisterType<FleetRolePolicy>("MerivusInternal", 1, 0, "FleetRolePolicy");
+    qmlRegisterType<FleetOperatorSession>("MerivusInternal", 1, 0, "FleetOperatorSession");
+    qmlRegisterType<FleetOperationApproval>("MerivusInternal", 1, 0, "FleetOperationApproval");
+    qmlRegisterType<FleetMissionEvidenceRefresh>("MerivusInternal", 1, 0, "FleetMissionEvidenceRefresh");
+    qmlRegisterType<FleetMissionStartContentCheck>("MerivusInternal", 1, 0, "FleetMissionStartContentCheck");
+    qmlRegisterType<FleetMissionStartApproval>("MerivusInternal", 1, 0, "FleetMissionStartApproval");
+    qmlRegisterType<FleetMissionStartupAuthority>("MerivusInternal", 1, 0, "FleetMissionStartupAuthority");
+    qmlRegisterType<FleetMissionStartupTransaction>("MerivusInternal", 1, 0, "FleetMissionStartupTransaction");
+    qmlRegisterType<FleetMissionArmedGroundReview>("MerivusInternal", 1, 0, "FleetMissionArmedGroundReview");
+    qmlRegisterType<FleetMissionGroundStartApproval>("MerivusInternal", 1, 0, "FleetMissionGroundStartApproval");
+    qmlRegisterType<FleetMissionGroundStartupAuthority>("MerivusInternal", 1, 0, "FleetMissionGroundStartupAuthority");
+    qmlRegisterType<FleetMissionStartupSeries>("MerivusInternal", 1, 0, "FleetMissionStartupSeries");
+    qmlRegisterType<FleetMissionObservationClose>("MerivusInternal", 1, 0, "FleetMissionObservationClose");
+    qmlRegisterType<FleetTaskTemplateRegistry>("MerivusInternal", 1, 0, "FleetTaskTemplateRegistry");
+    qmlRegisterType<FleetUserTaskTemplates>("MerivusInternal", 1, 0, "FleetUserTaskTemplates");
+    qmlRegisterType<FleetMissionReportWorkspace>("MerivusInternal", 1, 0, "FleetMissionReportWorkspace");
+    qmlRegisterType<MissionHandoffManager>("MerivusInternal", 1, 0, "MissionHandoffManager");
+    qmlRegisterType<SwarmMissionOrchestrator>("MerivusInternal", 1, 0, "SwarmMissionOrchestrator");
+    qmlRegisterType<SwarmController>("MerivusInternal", 1, 0, "SwarmController");
+    qmlRegisterType<FleetEventBlackBox>("MerivusInternal", 1, 0, "FleetEventBlackBox");
+    qmlRegisterType<FleetPersistentEventStore>("MerivusInternal", 1, 0, "FleetPersistentEventStore");
+    qmlRegisterType<FleetTelemetryArchive>("MerivusInternal", 1, 0, "FleetTelemetryArchive");
+    qmlRegisterType<FleetTimelineReplay>("MerivusInternal", 1, 0, "FleetTimelineReplay");
+    qmlRegisterType<FleetMissionSimulator>("MerivusInternal", 1, 0, "FleetMissionSimulator");
+    qmlRegisterType<FleetMissionDigitalTwin>("MerivusInternal", 1, 0, "FleetMissionDigitalTwin");
+    qmlRegisterType<FleetMissionEvidenceChain>("MerivusInternal", 1, 0, "FleetMissionEvidenceChain");
+    qmlRegisterType<FleetMissionContinuityPlanner>("MerivusInternal", 1, 0, "FleetMissionContinuityPlanner");
+    qmlRegisterType<FleetMissionReviewCoordinator>("MerivusInternal", 1, 0, "FleetMissionReviewCoordinator");
+    qmlRegisterType<FleetOperationalMemory>("MerivusInternal", 1, 0, "FleetOperationalMemory");
+    qmlRegisterType<FleetIntentTask>("MerivusInternal", 1, 0, "FleetIntentTask");
+    qmlRegisterType<FleetRiskRadar>("MerivusInternal", 1, 0, "FleetRiskRadar");
     _options = new CustomOptions(this, this);
     _showAdvancedUI = false;
 }

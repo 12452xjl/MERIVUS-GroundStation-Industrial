@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <QString>
 #include <QStringList>
 #include <QVariantMap>
 
@@ -29,6 +30,21 @@ struct VehicleCapability
     bool online = false;
     QDateTime lastSeenUtc;
 
+    // Static configuration evidence supplied by the vehicle/backend.  These
+    // fields are deliberately separate from runtime health so a heartbeat
+    // cannot make a modified airframe look like its approved baseline.
+    QVariantMap configuration;
+    QString configurationFingerprint;
+    QString baselineConfigurationFingerprint;
+    // Only "trusted_manifest" or an explicit local operator approval are
+    // accepted as approval sources. A value echoed by vehicle telemetry is
+    // intentionally treated as unverified.
+    QString baselineSource;
+    // unknown: no configuration evidence; unverified: evidence exists but no
+    // approved baseline; baseline: evidence matches the approved baseline;
+    // modified: evidence differs from the approved baseline.
+    QString configurationState;
+
     // Runtime health values are -1 when the source has not reported one yet.
     double batteryPercent = -1.0;
     int linkQualityPercent = -1;
@@ -38,6 +54,17 @@ struct VehicleCapability
     bool positionHealthKnown = false;
     bool hasFault = false;
     QString faultSummary;
+    // Fault status is a separate evidence channel.  `hasFault=false` alone
+    // must never be interpreted as a current no-fault observation when the
+    // source stopped reporting.  The age is measured by the adapter's
+    // observation layer; -1 means that freshness was not supplied.
+    bool faultHealthKnown = false;
+    int faultEvidenceAgeMs = -1;
+    // Ground-station monotonic freshness anchor for the last paired fault
+    // assessment. The adapter-reported age is advanced from this point on
+    // every health refresh, so a one-time age=0 report cannot stay fresh
+    // forever when only heartbeats continue.
+    QDateTime faultEvidenceObservedUtc;
     int healthScore = 0;
     QString healthState;
     QString healthReason;
@@ -47,6 +74,10 @@ struct VehicleCapability
     QVariantMap metadata;
 
     QVariantMap toVariantMap() const;
+    /// Compute a deterministic SHA-256 fingerprint for a configuration map.
+    /// Keys are sorted recursively and runtime fields are not added by this
+    /// helper, so the result is stable across transports and process restarts.
+    static QString fingerprintForConfiguration(const QVariantMap& configuration);
     static VehicleCapability fromVariantMap(const QVariantMap& descriptor,
                                             int fallbackSystemId = 0);
 };

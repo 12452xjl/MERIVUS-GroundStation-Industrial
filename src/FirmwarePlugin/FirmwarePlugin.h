@@ -255,8 +255,13 @@ public:
     virtual QString _internalParameterMetaDataFile(Vehicle* /*vehicle*/) { return QString(); }
 
     /// Loads the specified parameter meta data file.
-    /// @return Opaque parameter meta data information which must be stored with Vehicle. Vehicle is responsible to
-    ///         call deleteParameterMetaData when no longer needed.
+    /// @return A valid newly created, parentless opaque QObject, or nullptr.
+    ///         Ownership transfers to CompInfoParam's native catalogue. Keep
+    ///         all returned FactMetaData children owned by this opaque object;
+    ///         the caller copies definitions into actual Fact-owned snapshots
+    ///         and releases the opaque object when its last catalogue use ends.
+    ///         Custom plugins must obey this C++ lifetime/ownership contract;
+    ///         parentlessness alone is not plugin identity authentication.
     /// Important: Only CompInfoParam code should use this method
     virtual QObject* _loadParameterMetaData(const QString& /*metaDataFile*/) { return nullptr; }
 

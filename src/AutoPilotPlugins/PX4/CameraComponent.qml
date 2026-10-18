@@ -62,6 +62,16 @@ SetupPage {
                 }
             }
 
+            function _rebootWriteAllowed() {
+                var vehicle = QGroundControl.multiVehicleManager.activeVehicle
+                return vehicle
+                        && vehicle.initialConnectComplete
+                        && vehicle.vehicleLinkManager
+                        && !vehicle.vehicleLinkManager.communicationLost
+                        && !vehicle.armed
+                        && !vehicle.flying
+            }
+
             Component.onCompleted: {
                 if(_auxPins) {
                     clearAuxArray()
@@ -89,8 +99,13 @@ SetupPage {
                     }
                     QGCButton {
                         text: qsTr("Apply and Restart")
+                        enabled: !_rebooting && _rebootWriteAllowed()
                         onClicked:      {
-                            //-- This will reboot the vehicle! We're set not to allow changes if armed.
+                            if (!_rebootWriteAllowed()) {
+                                mainWindow.showMessageDialog(qsTr("Restart blocked"),
+                                                             qsTr("Vehicle must be connected, link-ready, disarmed and not flying before restart."))
+                                return
+                            }
                             QGroundControl.multiVehicleManager.activeVehicle.rebootVehicle()
                             applyAndRestart.visible = false
                             _rebooting = true

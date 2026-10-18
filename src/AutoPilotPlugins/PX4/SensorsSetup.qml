@@ -36,6 +36,20 @@ Item {
 
     signal nextButtonClicked
 
+    // Reboot is a maintenance write.  Keep the setup-page shortcut behind
+    // the same transport and vehicle-state gate as the other maintenance
+    // entry points so a stale calibration dialog cannot reboot a changed or
+    // airborne target.
+    function _rebootWriteAllowed() {
+        var vehicle = controller ? controller.vehicle : null
+        return vehicle
+                && vehicle.initialConnectComplete
+                && vehicle.vehicleLinkManager
+                && !vehicle.vehicleLinkManager.communicationLost
+                && !vehicle.armed
+                && !vehicle.flying
+    }
+
     // Help text which is shown both in the status text area prior to pressing a cal button and in the
     // pre-calibration dialog.
 
@@ -333,7 +347,17 @@ Item {
                 QGCButton {
                     text:       qsTr("Reboot Vehicle")
                     visible:    showRebootVehicleButton
-                    onClicked: { controller.vehicle.rebootVehicle(); close() }
+                    enabled:    _root._rebootWriteAllowed()
+                    onClicked: {
+                        if (!_root._rebootWriteAllowed()) {
+                            mainWindow.showMessageDialog(
+                                        qsTr("Restart blocked"),
+                                        qsTr("Vehicle must be connected, link-ready, disarmed and not flying before restart."))
+                            return
+                        }
+                        controller.vehicle.rebootVehicle()
+                        close()
+                    }
                 }
 
                 QGCLabel {

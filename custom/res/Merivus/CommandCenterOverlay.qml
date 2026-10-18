@@ -24,6 +24,7 @@ Item {
     signal vehicleSelectionRequested(int vehicleId, bool selected)
     signal vehicleFocusRequested(int vehicleId)
     signal clearSelectionRequested()
+    signal missionPlannerRequested()
 
     readonly property real margin: Math.max(8, ScreenTools.defaultFontPixelWidth * 0.75)
     readonly property real topInset: toolInsets ? Math.max(margin, toolInsets.topEdgeLeftInset + margin) : margin
@@ -48,21 +49,60 @@ Item {
     readonly property var guidedController: globals.guidedControllerFlyView
     readonly property var fleetHealth: guidedController && guidedController.fleetHealthSummary
                                       ? guidedController.fleetHealthSummary
-                                      : ({ state: "unknown", score: 0, onlineVehicleCount: 0, vehicleCount: 0 })
-    readonly property var missionSummary: guidedController && guidedController.missionOrchestrator
-                                          ? guidedController.missionOrchestrator.fleetSummary
+                                      : ({ state: "unknown", score: 0, scoreKnown: false, onlineVehicleCount: 0, vehicleCount: 0 })
+    readonly property var missionSummary: guidedController && guidedController.missionSummary
+                                          ? guidedController.missionSummary
                                           : ({ taskCount: 0, runningCount: 0 })
+    // Evaluate the selected targets against the same read-only health gate
+    // used by GuidedActionsController.  Referencing fleetHealthSummary keeps
+    // this binding live when telemetry changes, rather than only when the
+    // selection changes.
+    readonly property var selectedTakeoffGate: guidedController && guidedController.fleetHealthCenter
+                                               && guidedController.fleetHealthSummary
+                                               ? guidedController.fleetHealthCenter.evaluateTakeoffGate(selectedIdsSnapshot())
+                                               : ({ allowed: false, state: "blocked", reasons: [] })
+    readonly property var selectedTaskGate: guidedController && guidedController.fleetHealthCenter
+                                            && guidedController.fleetHealthSummary
+                                            ? guidedController.fleetHealthCenter.evaluateTaskGate(selectedIdsSnapshot(), false)
+                                            : ({ allowed: false, state: "blocked", reasons: [] })
+    readonly property var liveTransaction: guidedController ? guidedController.latestLiveTransaction : null
     readonly property var faultRecommendations: guidedController && guidedController.faultToleranceManager
                                                 ? guidedController.faultToleranceManager.recommendations
                                                 : []
-    readonly property var fleetIntentTask: guidedController && guidedController.intentTask
-                                           ? guidedController.intentTask : null
+    readonly property string fleetIntentTaskState: guidedController
+                                                  ? guidedController.intentTaskState : ""
     readonly property var fleetRiskRadar: guidedController && guidedController.riskRadar
                                           ? guidedController.riskRadar : null
     readonly property var fleetEventBlackBox: guidedController && guidedController.eventBlackBox
                                               ? guidedController.eventBlackBox : null
+    readonly property var fleetEventRuleSuggestions: guidedController && guidedController.eventRuleSuggestions
+                                                       ? guidedController.eventRuleSuggestions : []
     readonly property var fleetHandoffManager: guidedController && guidedController.missionHandoffManager
                                                ? guidedController.missionHandoffManager : null
+    readonly property var fleetContinuityPlanner: guidedController && guidedController.missionContinuityPlanner
+                                                  ? guidedController.missionContinuityPlanner : null
+    readonly property var fleetContinuitySuggestions: guidedController && guidedController.missionContinuitySuggestions
+                                                      ? guidedController.missionContinuitySuggestions : []
+    readonly property var fleetMissionDigitalTwin: guidedController && guidedController.missionDigitalTwin
+                                                    ? guidedController.missionDigitalTwin : null
+    readonly property var fleetOperationalMemory: guidedController && guidedController.operationalMemory
+                                                   ? guidedController.operationalMemory : null
+    readonly property var fleetMissionEvidenceChain: guidedController && guidedController.missionEvidenceChain
+                                                       ? guidedController.missionEvidenceChain : null
+    readonly property var fleetMissionReport: guidedController && guidedController.missionReport
+                                                ? guidedController.missionReport : null
+    readonly property var fleetLinkDegradationSnapshots: guidedController && guidedController.linkDegradationSnapshots
+                                                           ? guidedController.linkDegradationSnapshots : []
+    readonly property var fleetMaintenanceAssessments: guidedController && guidedController.maintenanceAssessments
+                                                         ? guidedController.maintenanceAssessments : []
+    readonly property var fleetTimelineReplay: guidedController && guidedController.timelineReplay
+                                                ? guidedController.timelineReplay : null
+    readonly property var fleetTaskTemplateCatalog: guidedController && guidedController.taskTemplateCatalog
+                                                     ? guidedController.taskTemplateCatalog : []
+    readonly property var fleetExtensionCatalog: guidedController && guidedController.extensionCatalog
+                                                  ? guidedController.extensionCatalog : []
+    readonly property var fleetAutonomyPolicySnapshot: guidedController && guidedController.autonomyPolicySnapshot
+                                                        ? guidedController.autonomyPolicySnapshot : ({})
 
     property real leftPanelTopExtra: 3
     property real rightPanelTopExtra: 3
@@ -90,6 +130,95 @@ Item {
     function clamp(value, minValue, maxValue) { return Math.max(minValue, Math.min(maxValue, value)) }
     // Preserve the previous 96-DPI sizing while following QGC's point-size convention.
     function fontPointSize(pixelSize) { return pixelSize * 0.75 }
+
+    function linkDegradationSummary() {
+        var snapshots = root.fleetLinkDegradationSnapshots || []
+        if (snapshots.length === 0) return tr("链路策略：等待链路证据")
+        var unknown = 0
+        var degraded = 0
+        var receptionComplete = 0
+        var receptionIncomplete = 0
+        var receptionUnavailable = 0
+        var latencyKnown = 0
+        var cameraReported = 0
+        var cameraIncomplete = 0
+        var cameraUnavailable = 0
+        for (var i = 0; i < snapshots.length; i++) {
+            var policy = snapshots[i] && snapshots[i].policy ? snapshots[i].policy : null
+            var level = policy && policy.level ? String(policy.level).toLowerCase() : "unknown"
+            if (level === "unknown" || level === "indeterminate") unknown++
+            else if (level !== "normal" && level !== "nominal" && level !== "stable") degraded++
+            var reception = policy && policy.localReception ? policy.localReception : null
+            if (reception && reception.state === "complete" && reception.windowComplete === true)
+                receptionComplete++
+            else if (reception && reception.state === "incomplete") receptionIncomplete++
+            else receptionUnavailable++
+            if (policy && policy.localLatency && policy.localLatency.roundTripKnown === true) latencyKnown++
+            var camera = policy && policy.localCamera ? policy.localCamera : null
+            if (camera && camera.state === "reported" && camera.matchedFreshStatusCount > 0) cameraReported++
+            else if (camera && camera.state === "incomplete") cameraIncomplete++
+            else cameraUnavailable++
+        }
+        return tr("链路策略：%1 架降级 · %2 架证据不足 · 共 %3 架")
+                .arg(degraded).arg(unknown).arg(snapshots.length)
+                + "\n" + tr("该次本地接收窗快照：完整 %1 · 不足 %2 · 不可用 %3；不代表可用带宽、延迟或丢包率")
+                .arg(receptionComplete).arg(receptionIncomplete).arg(receptionUnavailable)
+                + "\n" + tr("该次定向往返耗时快照：%1 架有新鲜匹配回显；包含排队与远端处理，不是纯网络延迟")
+                .arg(latencyKnown)
+                + "\n" + tr("该次相机状态报告：匹配 %1 · 不足 %2 · 不可用 %3 架；不确认实际送流、停流或带宽变化")
+                .arg(cameraReported).arg(cameraIncomplete).arg(cameraUnavailable)
+    }
+
+    function maintenanceSummary() {
+        var assessments = root.fleetMaintenanceAssessments || []
+        if (assessments.length === 0) return tr("维护护照：无记录，不能证明维护状态")
+        var review = maintenanceReviewCount()
+        var historical = 0
+        for (var i = 0; i < assessments.length; ++i) {
+            if (assessments[i] && assessments[i].historicalOnly === true) historical++
+        }
+        return tr("维护护照：%1 个来源组 · %2 组需人工复核；其中%3组为历史档案")
+                .arg(assessments.length).arg(review).arg(historical)
+                + "\n" + tr("来源组不等于飞机数量；历史观察不认证当前维护状态或飞行许可")
+    }
+
+    function maintenanceReviewCount() {
+        var assessments = root.fleetMaintenanceAssessments || []
+        var review = 0
+        for (var i = 0; i < assessments.length; i++) {
+            var status = assessments[i] && assessments[i].maintenanceStatus
+                       ? String(assessments[i].maintenanceStatus).toLowerCase() : "unknown"
+            if (status !== "clear" && status !== "ok" && status !== "nominal") review++
+        }
+        return review
+    }
+
+    // Capability discovery is evidence, not an automatic approval. Keep the
+    // trust split visible beside the other fleet summaries so an operator can
+    // see when a task is relying on observed-only capabilities.
+    function capabilityTrustSummary() {
+        var registry = root.guidedController && root.guidedController.fleetRegistry
+                       ? root.guidedController.fleetRegistry : null
+        var vehicles = registry && registry.vehicles ? registry.vehicles : []
+        if (vehicles.length === 0) return tr("能力证据：暂无车辆档案")
+        var verified = 0
+        var observedOnly = 0
+        var invalid = 0
+        for (var i = 0; i < vehicles.length; i++) {
+            var item = vehicles[i] || {}
+            var metadata = item.metadata || {}
+            var state = String(item.discoveryState || metadata.discoveryState || "unknown").toLowerCase()
+            if (state === "invalid") {
+                invalid++
+                continue
+            }
+            var verifiedCaps = metadata.verifiedCapabilities
+            if (verifiedCaps && verifiedCaps.length > 0) verified++
+            else observedOnly++
+        }
+        return tr("能力证据：%1 架本地工程采纳有效 · %2 架仅声明或观测 · %3 架发现无效")
+                .arg(verified).arg(observedOnly).arg(invalid)
+    }
 
     function vehicleById(vehicleId) {
         if (!vehicles) return null
@@ -138,6 +267,52 @@ Item {
         if (fleetHealth.state === "critical") return qgcPal.colorRed
         if (fleetHealth.state === "degraded") return qgcPal.colorOrange
         return root.nominal
+    }
+
+    function gateStateText(gate) {
+        if (!gate || selectedCount() === 0) return tr("未选择目标")
+        if (gate.state === "ready" && gate.allowed) return tr("允许执行")
+        if (gate.state === "review") return tr("需人工复核")
+        return tr("已阻止")
+    }
+
+    function gateColor(gate) {
+        if (!gate || selectedCount() === 0) return root.muted
+        if (gate.state === "ready" && gate.allowed) return root.nominal
+        if (gate.state === "review") return qgcPal.colorOrange
+        return qgcPal.colorRed
+    }
+
+    function gateReasonText(gate) {
+        if (!gate || selectedCount() === 0) return tr("选择目标后显示起飞/任务门禁。")
+        var reasons = gate.reasons || []
+        var lines = []
+        for (var i = 0; i < reasons.length && i < 2; i++) {
+            var reason = reasons[i] || {}
+            var vehicle = Number(reason.vehicleId) > 0 ? tr("UAV-%1：").arg(reason.vehicleId) : ""
+            lines.push(vehicle + (reason.message || reason.code || tr("状态未确认")))
+        }
+        return lines.length > 0 ? lines.join("；") : tr("所有选中目标均已通过基础健康检查。")
+    }
+
+    function recommendationText() {
+        if (!faultRecommendations || faultRecommendations.length === 0) return ""
+        var recommendation = faultRecommendations[0] || {}
+        var vehicle = Number(recommendation.vehicleId) > 0 ? tr("UAV-%1").arg(recommendation.vehicleId) : tr("舰队")
+        return tr("建议：%1 · %2 · %3")
+                .arg(vehicle)
+                .arg(recommendation.action || tr("观察"))
+                .arg(recommendation.reason || tr("状态变化"))
+    }
+
+    function transactionStatusText(transaction) {
+        if (!transaction) return ""
+        var targetCount = Number(transaction.targetCount || 0)
+        var completedCount = Number(transaction.completedCount || 0)
+        return tr("事务 %1 · %2 · %3/%4 完成")
+                .arg(String(transaction.transactionId || "--").slice(0, 8))
+                .arg(transaction.status || tr("未知"))
+                .arg(completedCount).arg(targetCount)
     }
 
     function selectedSummary() {
@@ -309,7 +484,8 @@ function escFact(vehicle, prefix, motorIndex) {
 
     function linkStateText(vehicle) {
         if (!vehicle) return tr("\u672a\u8fde\u63a5")
-        if (vehicle.vehicleLinkManager && vehicle.vehicleLinkManager.communicationLost) return tr("\u94fe\u8def\u5f02\u5e38")
+        if (!vehicle.vehicleLinkManager) return tr("\u94fe\u8def\u672a\u77e5")
+        if (vehicle.vehicleLinkManager.communicationLost) return tr("\u94fe\u8def\u5f02\u5e38")
         return tr("\u5df2\u8fde\u63a5")
     }
 
@@ -327,6 +503,7 @@ function escFact(vehicle, prefix, motorIndex) {
 
     function hasValidFormationSelection() {
         if (!selectedIds || selectedIds.length < 1 || selectedIds.length > 6) return false
+        if (!selectedTaskGate || !selectedTaskGate.allowed) return false
         var sorted = selectedIdsSnapshot().sort(function(a, b) { return Number(a) - Number(b) })
         if (Number(sorted[0]) !== 1) return false
         if (sorted.length === 6 && sorted.join(",") !== "1,2,3,4,5,6") return false
@@ -372,12 +549,13 @@ function escFact(vehicle, prefix, motorIndex) {
     }
 
     function canSendFocusCommand() {
-        return focusVehicle && !(focusVehicle.vehicleLinkManager && focusVehicle.vehicleLinkManager.communicationLost)
+        return focusVehicle && focusVehicle.vehicleLinkManager
+                && !focusVehicle.vehicleLinkManager.communicationLost
     }
 
     function vehicleCanTakeoff(vehicle) {
         if (!vehicle || !vehicle.initialConnectComplete || !vehicle.guidedModeSupported || !vehicle.takeoffVehicleSupported || vehicle.flying) return false
-        if (vehicle.vehicleLinkManager && vehicle.vehicleLinkManager.communicationLost) return false
+        if (!vehicle.vehicleLinkManager || vehicle.vehicleLinkManager.communicationLost) return false
         var report = vehicle.healthAndArmingCheckReport
         return !report || !report.supported || report.canTakeoff
     }
@@ -385,6 +563,8 @@ function escFact(vehicle, prefix, motorIndex) {
     function takeoffTargetsAvailable() {
         if (!guidedController) return false
         if (selectedCount() === 0) return guidedController.showTakeoff
+
+        if (!selectedTakeoffGate || !selectedTakeoffGate.allowed) return false
 
         for (var i = 0; i < selectedIds.length; i++) {
             if (vehicleCanTakeoff(vehicleById(selectedIds[i]))) return true
@@ -395,7 +575,7 @@ function escFact(vehicle, prefix, motorIndex) {
     function vehicleCanLand(vehicle) {
         if (!vehicle || !vehicle.initialConnectComplete || !vehicle.guidedModeSupported
                 || !vehicle.armed || !vehicle.flying || vehicle.fixedWing) return false
-        if (vehicle.vehicleLinkManager && vehicle.vehicleLinkManager.communicationLost) return false
+        if (!vehicle.vehicleLinkManager || vehicle.vehicleLinkManager.communicationLost) return false
         return vehicle.flightMode !== vehicle.landFlightMode
     }
 
@@ -412,7 +592,7 @@ function escFact(vehicle, prefix, motorIndex) {
     function vehicleCanRTL(vehicle) {
         if (!vehicle || !vehicle.initialConnectComplete || !vehicle.guidedModeSupported
                 || !vehicle.armed || !vehicle.flying) return false
-        if (vehicle.vehicleLinkManager && vehicle.vehicleLinkManager.communicationLost) return false
+        if (!vehicle.vehicleLinkManager || vehicle.vehicleLinkManager.communicationLost) return false
         return vehicle.flightMode !== vehicle.rtlFlightMode && vehicle.flightMode !== vehicle.smartRTLFlightMode
     }
 
@@ -436,22 +616,20 @@ function escFact(vehicle, prefix, motorIndex) {
     }
 
     function applyControlCommand(kind) {
-        // 这些是显式人工参数/Guided 操作，不属于 AI 建议链路。
-        if (!canSendFocusCommand()) {
-            mainWindow.showMessageDialog(tr("指令未发送"), tr("当前没有可用的焦点飞行器，或链路已断开。"))
+        // All three typed parameter controls use one frozen-target
+        // confirmation/preflight path.  The controller re-resolves the
+        // vehicle at confirmation time and records that parameter/Guided
+        // success is still pending telemetry acknowledgement.
+        var vehicle = focusVehicle
+        var vehicleId = vehicle ? Number(vehicle.id) : 0
+        var value = kind === "altitude" ? altitudeCommandMeters
+                  : (kind === "speed" ? speedCommandMetersSecond
+                     : takeoffSpeedCommandMetersSecond)
+        if (!guidedController || !guidedController.requestControlCommand) {
+            mainWindow.showMessageDialog(tr("指令未发送"), tr("统一参数指令入口尚未就绪。"))
             return
         }
-        if (kind === "altitude") {
-            focusVehicle.guidedModeChangeAltitude(altitudeCommandMeters, false)
-        } else if (kind === "speed") {
-            if (focusVehicle.fixedWing || focusVehicle.vtolInFwdFlight) focusVehicle.guidedModeChangeEquivalentAirspeedMetersSecond(speedCommandMetersSecond)
-            else focusVehicle.guidedModeChangeGroundSpeedMetersSecond(speedCommandMetersSecond)
-        } else if (kind === "takeoffSpeed") {
-            if (!focusVehicle.setGuidedTakeoffSpeed(takeoffSpeedCommandMetersSecond)) {
-                mainWindow.showMessageDialog(tr("参数未下发"),
-                                             tr("当前飞行器未提供 MPC_TKO_SPEED，或输入值超出飞控允许范围。"))
-            }
-        }
+        guidedController.requestControlCommand(kind, value, vehicleId)
     }
 
     function configuredTakeoffSpeedText(vehicle) {
@@ -575,6 +753,96 @@ function escFact(vehicle, prefix, motorIndex) {
                 }
             }
 
+            // Session-local fixed-address waiting queue stays reachable even
+            // when current formation/health/occupancy gates block dispatch.
+            FleetFormationQueuePanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                controller: root.guidedController
+                selectedIds: root.guidedController ? root.guidedController.selectedVehicleIds : []
+                maximumBodyHeight: Math.max(ScreenTools.defaultFontPixelHeight * 5, fleetPanel.height * 0.3)
+            }
+
+            QGCButton {
+                Layout.fillWidth: true
+                text: qsTr("区域任务规划（仅提案）")
+                onClicked: root.missionPlannerRequested()
+            }
+
+            FleetMissionLifecyclePanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                controller: root.guidedController
+            }
+
+            FleetMissionStartupPanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                controller: root.guidedController
+            }
+
+            FleetFirmwareCatalogPanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                controller: root.guidedController
+            }
+
+            FleetOptionalTelemetryPanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                controller: root.guidedController
+            }
+            FleetLinkLatencyPanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                controller: root.guidedController
+            }
+            FleetCameraStreamCapturePanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                controller: root.guidedController
+            }
+
+            FleetCapabilityReviewPanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                controller: root.guidedController
+            }
+
+            FleetArchiveHistoryPanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                archive: root.guidedController ? root.guidedController.persistentEventArchive : null
+            }
+
+            FleetTelemetryHistoryPanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                archive: root.guidedController ? root.guidedController.telemetryArchive : null
+            }
+
+            FleetMaintenanceWorkspacePanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                controller: root.guidedController
+            }
+
+            // Always reachable, including when restart-review holds prevent
+            // continuity suggestions. This is not a flight/control action.
+            FleetOccupancyRecoveryPanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                controller: root.guidedController
+            }
+
+            // Local monitoring has its own review/identity workflow. Keep
+            // this entry independent of draft, selection and flight actions.
+            FleetMissionObservationPanel {
+                Layout.fillWidth: true
+                Layout.minimumHeight: implicitHeight
+                controller: root.guidedController
+            }
+
             QGCLabel {
                 Layout.fillWidth: true
                 text: root.focusVehicle ? tr("\u5f53\u524d\u7126\u70b9 UAV-%1").arg(root.focusVehicle.id) : tr("\u5f53\u524d\u65e0\u98de\u884c\u5668\u7126\u70b9")
@@ -629,7 +897,7 @@ function escFact(vehicle, prefix, motorIndex) {
                               ? tr("%1/%2 在线 · %3 分 · %4 个运行任务 · %5 条建议")
                                   .arg(root.fleetHealth.onlineVehicleCount || 0)
                                   .arg(root.fleetHealth.vehicleCount || 0)
-                                  .arg(root.fleetHealth.score || 0)
+                                  .arg(root.fleetHealth.scoreKnown ? root.fleetHealth.score : tr("待评分"))
                                   .arg(root.missionSummary.runningCount || 0)
                                   .arg(root.faultRecommendations ? root.faultRecommendations.length : 0)
                               : tr("等待车辆状态")
@@ -642,18 +910,236 @@ function escFact(vehicle, prefix, motorIndex) {
 
             QGCLabel {
                 Layout.fillWidth: true
-                text: root.fleetIntentTask
-                      ? tr("Fleet OS：意图 %1 · 风险 %2 · 事件 %3 · 待交接 %4")
-                          .arg(root.fleetIntentTask.state || tr("未创建"))
+                visible: root.fleetLinkDegradationSnapshots !== undefined
+                text: root.linkDegradationSummary()
+                textFormat: Text.PlainText
+                color: root.fleetLinkDegradationSnapshots && root.fleetLinkDegradationSnapshots.length > 0
+                       ? qgcPal.colorGrey : qgcPal.colorOrange
+                font.pointSize: root.fontPointSize(9)
+                wrapMode: Text.WordWrap
+            }
+
+            QGCLabel {
+                Layout.fillWidth: true
+                visible: root.fleetMaintenanceAssessments !== undefined
+                text: root.maintenanceSummary()
+                textFormat: Text.PlainText
+                color: root.fleetMaintenanceAssessments && root.fleetMaintenanceAssessments.length > 0
+                       && root.maintenanceReviewCount() === 0
+                       ? qgcPal.colorGrey : qgcPal.colorOrange
+                font.pointSize: root.fontPointSize(9)
+                wrapMode: Text.WordWrap
+            }
+
+            QGCLabel {
+                Layout.fillWidth: true
+                visible: root.guidedController !== null
+                         && root.guidedController.fleetRegistry !== undefined
+                text: root.capabilityTrustSummary()
+                color: root.guidedController && root.guidedController.fleetRegistry
+                       && root.guidedController.fleetRegistry.vehicles
+                       && root.guidedController.fleetRegistry.vehicles.length > 0
+                       ? qgcPal.colorGrey : qgcPal.colorOrange
+                font.pointSize: root.fontPointSize(9)
+                elide: Text.ElideRight
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.selectedCount() > 0 ? 42 : 30
+                radius: 7
+                color: Qt.rgba(root.gateColor(root.selectedTaskGate).r,
+                               root.gateColor(root.selectedTaskGate).g,
+                               root.gateColor(root.selectedTaskGate).b, 0.10)
+                border.color: root.gateColor(root.selectedTaskGate)
+                border.width: 1
+                visible: root.guidedController !== null
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 10
+                    spacing: 8
+
+                    QGCLabel {
+                        text: tr("目标门禁")
+                        color: qgcPal.text
+                        font.bold: true
+                        font.pointSize: root.fontPointSize(10)
+                    }
+                    QGCLabel {
+                        text: root.gateStateText(root.selectedTaskGate)
+                        color: root.gateColor(root.selectedTaskGate)
+                        font.bold: true
+                        font.pointSize: root.fontPointSize(10)
+                    }
+                    QGCLabel {
+                        Layout.fillWidth: true
+                        text: root.gateReasonText(root.selectedTaskGate)
+                        color: qgcPal.colorGrey
+                        font.pointSize: root.fontPointSize(9)
+                        elide: Text.ElideRight
+                    }
+                }
+            }
+
+            QGCLabel {
+                Layout.fillWidth: true
+                visible: root.faultRecommendations && root.faultRecommendations.length > 0
+                text: root.recommendationText()
+                color: qgcPal.colorOrange
+                font.pointSize: root.fontPointSize(10)
+                elide: Text.ElideRight
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 38
+                radius: 7
+                color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.08)
+                border.color: root.mutedLine
+                border.width: 1
+                visible: root.liveTransaction !== null
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 8
+                    spacing: 8
+
+                    QGCLabel {
+                        Layout.fillWidth: true
+                        text: root.transactionStatusText(root.liveTransaction)
+                        color: qgcPal.text
+                        font.pointSize: root.fontPointSize(10)
+                        elide: Text.ElideRight
+                    }
+                    QGCButton {
+                        text: tr("取消事务")
+                        Layout.preferredWidth: 72
+                        Layout.preferredHeight: 26
+                        onClicked: {
+                            if (!root.guidedController || !root.liveTransaction) return
+                            var id = root.liveTransaction.transactionId || ""
+                            if (!root.guidedController.cancelTransaction(id, "operator_cancelled_from_command_center")) {
+                                mainWindow.showMessageDialog(tr("事务未取消"), tr("事务已结束，或取消请求未被接受。"))
+                            }
+                        }
+                    }
+                }
+            }
+
+            QGCLabel {
+                Layout.fillWidth: true
+                text: root.guidedController
+                      ? tr("Fleet OS：意图 %1 · 风险 %2 · 事件 %3 · 规则建议 %4 · 待交接 %5")
+                          .arg(root.fleetIntentTaskState || tr("未创建"))
                           .arg(root.fleetRiskRadar ? (root.fleetRiskRadar.level || tr("未知")) : tr("未知"))
                           .arg(root.fleetEventBlackBox && root.fleetEventBlackBox.events
                                ? root.fleetEventBlackBox.events.length : 0)
+                          .arg(root.guidedController.eventRuleReviewWorkspace.status.pendingCount || 0)
                           .arg(root.fleetHandoffManager ? root.fleetHandoffManager.pendingCount : 0)
                       : tr("Fleet OS：等待意图任务")
                 color: root.fleetRiskRadar && root.fleetRiskRadar.level === "critical"
                        ? qgcPal.colorRed : qgcPal.colorGrey
                 font.pointSize: root.fontPointSize(10)
                 elide: Text.ElideRight
+            }
+
+            QGCLabel {
+                Layout.fillWidth: true
+                visible: root.fleetTimelineReplay !== null
+                text: root.fleetTimelineReplay
+                      ? tr("时间轴回放：%1/%2 · %3")
+                          .arg(root.fleetTimelineReplay.position || 0)
+                          .arg(root.fleetTimelineReplay.events ? root.fleetTimelineReplay.events.length : 0)
+                          .arg(root.fleetTimelineReplay.playing ? tr("播放中") : tr("已暂停"))
+                      : ""
+                color: qgcPal.colorGrey
+                font.pointSize: root.fontPointSize(9)
+                elide: Text.ElideRight
+            }
+
+            FleetRuleReviewPanel {
+                Layout.fillWidth: true
+                workspace: root.guidedController ? root.guidedController.eventRuleReviewWorkspace : null
+                visible: workspace !== null
+                onPlannerRequested: root.missionPlannerRequested()
+            }
+
+            QGCLabel {
+                Layout.fillWidth: true
+                visible: root.fleetMissionEvidenceChain
+                         && root.fleetMissionEvidenceChain.count > 0
+                text: root.fleetMissionEvidenceChain
+                      ? tr("任务证据链：%1 条 · 头哈希 %2")
+                          .arg(root.fleetMissionEvidenceChain.count)
+                          .arg(String(root.fleetMissionEvidenceChain.headHash || "").slice(0, 12))
+                      : ""
+                color: qgcPal.colorGrey
+                font.pointSize: root.fontPointSize(9)
+                elide: Text.ElideRight
+            }
+
+            QGCLabel {
+                Layout.fillWidth: true
+                visible: root.fleetMissionReport !== null
+                text: root.fleetMissionReport
+                      ? tr("审阅报告：%1 · 异常 %2 · 未验证 %3 · 仅报告/待人工确认")
+                          .arg(root.fleetMissionReport.verdict ? root.fleetMissionReport.verdict.status : tr("待复核"))
+                          .arg(root.fleetMissionReport.incidents ? root.fleetMissionReport.incidents.length : 0)
+                          .arg(root.fleetMissionReport.unverifiedItems ? root.fleetMissionReport.unverifiedItems.length : 0)
+                      : ""
+                color: root.fleetMissionReport && root.fleetMissionReport.verdict && root.fleetMissionReport.verdict.status === "blocked"
+                       ? qgcPal.colorRed : qgcPal.colorGrey
+                font.pointSize: root.fontPointSize(9)
+                elide: Text.ElideRight
+            }
+
+            FleetContinuityPanel {
+                Layout.fillWidth: true
+                planner: root.fleetContinuityPlanner
+                visible: root.fleetContinuityPlanner !== null
+                         && (root.fleetContinuitySuggestions.length > 0 || root.missionSummary.runningCount > 0)
+            }
+
+            FleetHandoffPanel {
+                Layout.fillWidth: true
+                manager: root.fleetHandoffManager
+                controller: root.guidedController
+                visible: root.fleetHandoffManager !== null
+            }
+
+            FleetMissionReviewReportPanel {
+                Layout.fillWidth: true
+                workspace: root.guidedController ? root.guidedController.reviewReportWorkspace : null
+            }
+
+            FleetEvidenceArchivePanel {
+                Layout.fillWidth: true
+                workspace: root.guidedController ? root.guidedController.missionEvidenceWorkspace : null
+                visible: workspace !== null
+            }
+
+            FleetCatalogPanel {
+                Layout.fillWidth: true
+                templates: root.fleetTaskTemplateCatalog
+                extensions: root.fleetExtensionCatalog
+                autonomyPolicy: root.fleetAutonomyPolicySnapshot
+            }
+
+            FleetDigitalTwinPanel {
+                Layout.fillWidth: true
+                twin: root.fleetMissionDigitalTwin
+                visible: root.fleetMissionDigitalTwin !== null
+                         && root.fleetMissionDigitalTwin.hasSnapshot
+            }
+
+            FleetOperationalMemoryPanel {
+                Layout.fillWidth: true
+                memory: root.fleetOperationalMemory
+                visible: root.fleetOperationalMemory !== null
+                         && (root.fleetOperationalMemory.observations || []).length > 0
             }
 
             GridLayout {
@@ -735,7 +1221,8 @@ function escFact(vehicle, prefix, motorIndex) {
                 }
                 QGCLabel {
                     text: "\u25cb " + root.linkStateText(root.focusVehicle)
-                    color: root.focusVehicle && !(root.focusVehicle.vehicleLinkManager && root.focusVehicle.vehicleLinkManager.communicationLost) ? root.nominal : root.muted
+                    color: root.focusVehicle && root.focusVehicle.vehicleLinkManager
+                           && !root.focusVehicle.vehicleLinkManager.communicationLost ? root.nominal : root.muted
                     font.pointSize: root.fontPointSize(11)
                 }
             }

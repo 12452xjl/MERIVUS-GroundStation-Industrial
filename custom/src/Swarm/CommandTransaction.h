@@ -3,6 +3,7 @@
 #include <QDateTime>
 #include <QHash>
 #include <QObject>
+#include <QString>
 #include <QStringList>
 #include <QTimer>
 #include <QVariantList>
@@ -18,6 +19,7 @@ class CommandTransaction : public QObject
     Q_PROPERTY(QString transactionId READ transactionId CONSTANT)
     Q_PROPERTY(QString command READ command CONSTANT)
     Q_PROPERTY(QVariantList targetVehicleIds READ targetVehicleIds CONSTANT)
+    Q_PROPERTY(bool targetInputValid READ targetInputValid CONSTANT)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(int timeoutMs READ timeoutMs WRITE setTimeoutMs NOTIFY timeoutMsChanged)
     Q_PROPERTY(int maxRetries READ maxRetries WRITE setMaxRetries NOTIFY maxRetriesChanged)
@@ -47,6 +49,7 @@ public:
     QString transactionId() const { return _transactionId; }
     QString command() const { return _command; }
     QVariantList targetVehicleIds() const { return _targetVehicleIds; }
+    bool targetInputValid() const { return _targetInputValid; }
     QString status() const { return statusToString(_status); }
     Status statusValue() const { return _status; }
     int timeoutMs() const { return _timeoutMs; }
@@ -116,6 +119,11 @@ private:
     QVariantList _targetVehicleIds;
     QStringList _vehicleOrder;
     QHash<QString, VehicleState> _vehicles;
+    bool _targetInputValid = true;
+    // Blocks only nested start/retry publication, not cancel/safety handling.
+    // Never keep a reference-based rollback guard across a signal: the sender
+    // itself can be destroyed synchronously by one of its observers.
+    bool _attemptTransitionActive = false;
     Status _status = Status::Pending;
     int _timeoutMs = 5000;
     int _maxRetries = 0;

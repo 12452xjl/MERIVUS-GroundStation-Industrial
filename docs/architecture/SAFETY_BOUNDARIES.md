@@ -57,22 +57,22 @@
 
 风险：
 
-- AI proposal 白名单已收敛到 C++ `AiCommandPolicy`；QML 只显示本地判定结果。
-- 风险级别和基础审计已进入 C++；确认弹窗和执行前状态检查仍属于后续阶段。
+- AI proposal 白名单已收敛到 C++ `AiCommandPolicy`；QML 只显示本地判定结果，显式生成的 Fleet OS 草稿也只进入只读审阅计算。
+- 风险级别和基础审计已进入 C++；指挥中心参数卡和标准 Guided 高度/速度滑块已加入确认和执行前状态重查，参数/指令 ACK 仍需工程师补齐。
 - 当前 AI 路径符合“只输出建议，不执行飞行动作”的第一版安全目标。
 
 ### 指挥中心面板
 
 文件：`custom/res/Merivus/CommandCenterOverlay.qml`
 
-- 当前可直接对焦点飞行器下发高度、速度、爬升相关命令。
-- 爬升命令使用 `sendCommand`。
+- 当前指挥中心参数卡由操作员请求后经 `GuidedActionsController.requestControlCommand()` 进入冻结目标、人工确认和二次预检；这是当前 QML 界面约定，不是对不可信 QML 或插件的权限隔离。
+- 控制器在执行前重新解析 `vehicleId`，检查链路、Guided/飞行模式、机队健康和数值范围，并记录 `command.requested/confirmed/sent/rejected`。
+- `sent` 表示请求已交给 Vehicle API，不代表 MAVLink 或参数回读 ACK；起飞速度参数特别标记 `pending_telemetry`。
 
-风险：
+剩余风险：
 
-- 命令入口分散在 UI 中。
-- 缺少统一审计和风险确认策略。
-- 后续 AI 不应复用这些入口绕过本地策略。
+- 该路径已关闭面板直接调用 `Vehicle` 的旁路，但并未把普通参数设置变成完整的 `CommandTransaction`/MAVLink ACK 事务。
+- 工程师需用参数回读、状态遥测和超时序列验证“已提交”与“已生效”的区别。
 
 ### SwarmController
 
@@ -80,7 +80,7 @@
 
 - `executeGoto` 可调度多机 goto。
 - `executeQueuedGoto` 可上传临时任务。
-- 上传完成后可调用 `startMission`。
+- 上传完成后只能进入 `Starting`，由 `SwarmController` 等待 `MAV_CMD_MISSION_START` 接受或 Mission 模式遥测；标准任务启动也必须经 `executeStartMission()` 事务。上传成功、启动接受和任务完成是三个不同状态，不能互相替代。
 - `sendStartCommand` 使用协议 v2 的 `MAV_CMD_USER_1～4` 执行 PREPARE/COMMIT/RELEASE/ABORT；主机 `GPS_RAW_INT` 经校验后转换为绑定来源与会话 ID 的全成员 `FOLLOW_TARGET` 租约。
 
 风险：
@@ -124,7 +124,7 @@
 - 风险级别由 QGC 本地计算，不信任 Agent 自报风险。
 - 高风险命令只显示为 `PreviewOnly` 或 `Deny`。
 - `param.write` 和 `mavlink.send_raw` 强制拒绝。
-- QML 只显示建议卡片，没有执行按钮。
+- QML 只显示建议卡片，没有飞行动作执行按钮；“生成审阅”只调用 Fleet OS 预览，不请求批准或释放命令。普通视图不接触原始 `FleetIntentTask` 实例，只读取状态；审批必须经控制器包装入口，避免同引擎 QML 直接调用对象方法绕过审阅门禁。
 - 审计记录进入 `merivus.ai.policy`，不记录 Token、完整用户消息或敏感凭据。
 
 剩余风险仍包括非 AI 的指挥中心和 `SwarmController` 真实操作入口；这些不是本阶段新增能力，后续需要单独审计和确认框架。

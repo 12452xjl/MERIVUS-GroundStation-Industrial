@@ -199,7 +199,7 @@ UI 操作：
 - QML 不再直接创建活动 `XMLHttpRequest`。
 - C++ 请求字段为 `request_id`、`session_id`、`message`、`context`、`allowed_capabilities`。
 - C++ 响应字段校验为 `request_id`、`reply`、`proposal`、`provider`、`model`、`status`。
-- `proposal` 只在 QML 中显示为未执行建议，不转换为 Vehicle、MAVLink、Swarm 或 PX4 操作。
+- `proposal` 只在 QML 中显示为未执行建议；经操作员显式触发时可进入 Fleet OS 只读审阅草稿，但不转换为 Vehicle、MAVLink、Swarm 或 PX4 操作。
 - 独立 Python Agent 已按新契约实现 Mock HTTP 服务，并支持 `python -m app` 作为 Supervisor 的开发启动入口。
 - Supervisor 发布启动路径为 `QCoreApplication::applicationDirPath()/agent/merivus-agent.exe`；开发启动路径仅由 `MERIVUS_AGENT_DEV_PYTHON` 和 `MERIVUS_AGENT_DEV_ROOT` 显式启用。
 - Supervisor 不使用 `startDetached`，不使用阻塞式 `waitForFinished()`，也不自动 kill 端口上的未知进程。
@@ -213,7 +213,7 @@ UI 操作：
 
 ## AI 本地意图策略契约
 
-`feat/ai-intent-policy` 后，QGC 不再把 Agent `proposal` 原样交给 QML。`AiAgentClient` 会先调用 `AiSchemaValidator` 和 `AiCommandPolicy`，再把附带 `validationStatus`、`policyDecision`、`localRisk`、`requiresConfirmation`、`reason` 和 `executable=false` 的只读建议传给 QML。
+`feat/ai-intent-policy` 后，QGC 不再把 Agent `proposal` 原样交给 QML。`AiAgentClient` 会先调用 `AiSchemaValidator` 和 `AiCommandPolicy`，再把附带 `validationStatus`、`policyDecision`、`localRisk`、`requiresConfirmation`、`reason` 和 `executable=false` 的只读建议传给 QML。需要映射到 Fleet OS 阶段时，调用方可以把建议作为 `assisted` 输入 `FleetAutonomyPolicy`；该类只返回分级自主和平台适配器审阅结果，不改变 AI 策略，也不授予执行权限。
 
 Agent 返回的 `risk`、`requires_confirmation`、`executable`、`executed` 等字段不具备权限含义，QGC 会忽略并本地重算。未知字段不会触发任何执行；危险字段、危险嵌套结构、原始 MAVLink 参数数组、shell/script/PX4 批处理内容会被拒绝。
 

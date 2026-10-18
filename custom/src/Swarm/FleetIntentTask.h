@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QString>
 #include <QVariantMap>
 
 // Transport independent, human approval gated representation of a fleet task.
@@ -31,6 +32,8 @@ public:
     Q_INVOKABLE bool approve();
     Q_INVOKABLE bool reject(const QString& reason = QString());
     Q_INVOKABLE void cancel();
+    Q_INVOKABLE bool invalidateReview(const QString& reason = QString());
+    Q_INVOKABLE bool matchesInputs(const QString& intent, const QVariantMap& parameters) const;
 
 signals:
     void intentChanged();
@@ -45,4 +48,6 @@ private:
     QVariantMap _parameters;
     QVariantMap _preview;
     QString _approvalReason;
+    // Local notification fence only; never a published approval/flight token.
+    quint64 _revision = 0;
 };

@@ -112,6 +112,38 @@ QString ComponentInformationCache::insert(const QString &fileTag, const QString 
     return data.fileName();
 }
 
+bool ComponentInformationCache::invalidate(const QString& fileTag)
+{
+    // Never turn a cache key into a path, a wildcard or a directory request.
+    // Keep the older access/insert caller domains unchanged.
+    if (fileTag.isEmpty() || fileTag.size() > 128) return false;
+    for (const QChar ch : fileTag) {
+        if (!((ch >= QLatin1Char('A') && ch <= QLatin1Char('Z'))
+            || (ch >= QLatin1Char('a') && ch <= QLatin1Char('z'))
+            || (ch >= QLatin1Char('0') && ch <= QLatin1Char('9'))
+            || ch == QLatin1Char('_') || ch == QLatin1Char('-'))) return false;
+    }
+
+    const QString metaPath = metaFileName(fileTag);
+    const QString dataPath = dataFileName(fileTag);
+    // Attempt each exact file once, including when the other removal fails.
+    // Do not treat QFileInfo/exists false as confirmed absence (e.g. an IO or
+    // permission failure), retry, recurse, or trigger unrelated LRU eviction.
+    const bool metaRemoved = QFile::remove(metaPath);
+    const bool dataRemoved = QFile::remove(dataPath);
+    for (auto it = _cachedFiles.begin(); it != _cachedFiles.end();) {
+        if (it.value() == fileTag) it = _cachedFiles.erase(it);
+        else ++it;
+    }
+    _numFiles = _cachedFiles.size();
+    const bool removed = metaRemoved && dataRemoved;
+    if (!removed) {
+        qCWarning(ComponentInformationCacheLog) << "Exact cache invalidation unconfirmed" << fileTag
+            << "metadata removed:" << metaRemoved << "data removed:" << dataRemoved;
+    }
+    return removed;
+}
+
 void ComponentInformationCache::initializeDirectory()
 {
     if (!_path.exists()) {

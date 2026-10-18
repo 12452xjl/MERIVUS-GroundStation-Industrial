@@ -13,13 +13,39 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QJsonArray>
+#include <cmath>
 
 QGC_LOGGING_CATEGORY(JoystickMavCommandLog, "JoystickMavCommandLog")
 
-static void parseJsonValue(const QJsonObject& jsonObject, const QString& key, float& param)
+static bool parseJsonValue(const QJsonObject& jsonObject, const QString& key, float& param)
 {
-    if (jsonObject.contains(key))
-        param = static_cast<float>(jsonObject.value(key).toDouble());
+    if (!jsonObject.contains(key)) {
+        return true;
+    }
+    const double value = jsonObject.value(key).toDouble();
+    if (!std::isfinite(value)) {
+        return false;
+    }
+    param = static_cast<float>(value);
+    return std::isfinite(param);
+}
+
+QString JoystickMavCommand::normalizeSafetyClass(const QString& requested, int commandId)
+{
+    const QString normalized = requested.trimmed().toLower();
+    if (normalized == QStringLiteral("inflight_safe")) {
+        return (commandId == 2000 || commandId == 2001)
+                ? QStringLiteral("inflight_safe")
+                : QStringLiteral("disarmed_only");
+    }
+    if (normalized == QStringLiteral("disarmed_only")
+            || normalized == QStringLiteral("maintenance_only")) {
+        return normalized;
+    }
+    if (commandId == 2000 || commandId == 2001) {
+        return QStringLiteral("inflight_safe");
+    }
+    return QStringLiteral("disarmed_only");
 }
 
 QList<JoystickMavCommand> JoystickMavCommand::load(const QString& jsonFilename)
@@ -70,19 +96,27 @@ QList<JoystickMavCommand> JoystickMavCommand::load(const QString& jsonFilename)
             continue;
         }
         item._id = jsonObject.value("id").toInt();
+        if (item._id <= 0 || item._id > 65535) {
+            qWarning() << jsonFilename << ": invalid MAVLink command id" << item._id;
+            continue;
+        }
         if (!jsonObject.contains("name")) {
             qWarning() << jsonFilename << ": 'name' is required";
             continue;
         }
         item._name = jsonObject.value("name").toString();
         item._showError = jsonObject.value("showError").toBool();
-        parseJsonValue(jsonObject, "param1", item._param1);
-        parseJsonValue(jsonObject, "param2", item._param2);
-        parseJsonValue(jsonObject, "param3", item._param3);
-        parseJsonValue(jsonObject, "param4", item._param4);
-        parseJsonValue(jsonObject, "param5", item._param5);
-        parseJsonValue(jsonObject, "param6", item._param6);
-        parseJsonValue(jsonObject, "param7", item._param7);
+        item._safetyClass = normalizeSafetyClass(jsonObject.value("safetyClass").toString(), item._id);
+        if (!parseJsonValue(jsonObject, "param1", item._param1)
+                || !parseJsonValue(jsonObject, "param2", item._param2)
+                || !parseJsonValue(jsonObject, "param3", item._param3)
+                || !parseJsonValue(jsonObject, "param4", item._param4)
+                || !parseJsonValue(jsonObject, "param5", item._param5)
+                || !parseJsonValue(jsonObject, "param6", item._param6)
+                || !parseJsonValue(jsonObject, "param7", item._param7)) {
+            qWarning() << jsonFilename << ": command contains a non-finite parameter";
+            continue;
+        }
 
         qCDebug(JoystickMavCommandLog) << jsonObject;
 
@@ -92,10 +126,21 @@ QList<JoystickMavCommand> JoystickMavCommand::load(const QString& jsonFilename)
     return result;
 }
 
-void JoystickMavCommand::send(Vehicle* vehicle)
+bool JoystickMavCommand::send(Vehicle* vehicle)
 {
+    if (!vehicle || !vehicle->isInitialConnectComplete()
+            || !vehicle->vehicleLinkManager()
+            || vehicle->vehicleLinkManager()->communicationLost()
+            || vehicle->vehicleLinkManager()->primaryLink().expired()) {
+        return false;
+    }
+    if (_safetyClass != QStringLiteral("inflight_safe")
+            && (vehicle->armed() || vehicle->flying())) {
+        return false;
+    }
     vehicle->sendMavCommand(vehicle->defaultComponentId(),
                             static_cast<MAV_CMD>(_id),
                             _showError,
                             _param1, _param2, _param3, _param4, _param5, _param6, _param7);
+    return true;
 }

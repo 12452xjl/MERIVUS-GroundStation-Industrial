@@ -38,6 +38,15 @@ Rectangle {
     property real _margins:         ScreenTools.defaultFontPixelWidth / 2
     property bool _emergencyAction: action === guidedController.actionEmergencyStop
 
+    // The token is kept behind a lexical id rather than an exported QML
+    // property. The controller can set/clear it, and the confirm gesture can
+    // consume it, but another QML surface cannot read the expected value to
+    // manufacture a valid executeAction() call.
+    QtObject {
+        id: _confirmationState
+        property var token
+    }
+
     Component.onCompleted: guidedController.confirmDialog = this
 
     onVisibleChanged: {
@@ -63,6 +72,8 @@ Rectangle {
     }
 
     function confirmCancelled() {
+        var wasActive = visible || mapIndicator
+        _confirmationState.token = undefined
         guidedValueSlider.visible = false
         visible = false
         hideTrigger = false
@@ -71,6 +82,17 @@ Rectangle {
             mapIndicator.actionCancelled()
             mapIndicator = undefined
         }
+        if (wasActive && guidedController && guidedController.confirmationCancelled) {
+            guidedController.confirmationCancelled()
+        }
+    }
+
+    function setConfirmationToken(token) {
+        _confirmationState.token = token
+    }
+
+    function clearConfirmationToken() {
+        _confirmationState.token = undefined
     }
 
     Timer {
@@ -115,13 +137,17 @@ Rectangle {
 
                 onAccept: {
                     _root.visible = false
+                    var confirmationToken = _confirmationState.token
+                    _confirmationState.token = undefined
                     var sliderOutputValue = 0
                     if (guidedValueSlider.visible) {
                         sliderOutputValue = guidedValueSlider.getOutputValue()
                         guidedValueSlider.visible = false
                     }
                     hideTrigger = false
-                    guidedController.executeAction(_root.action, _root.actionData, sliderOutputValue, _root.optionChecked)
+                    guidedController.executeAction(_root.action, _root.actionData,
+                                                   sliderOutputValue, _root.optionChecked,
+                                                   confirmationToken)
                     if (mapIndicator) {
                         mapIndicator.actionConfirmed()
                         mapIndicator = undefined
@@ -151,4 +177,3 @@ Rectangle {
         }
     }
 }
-

@@ -65,6 +65,19 @@ SetupPage {
 
             property string _restartRequired: qsTr("Requires vehicle reboot")
 
+            // Reboot is a maintenance write. Require a completed handshake,
+            // live transport and a grounded vehicle; the click handler below
+            // repeats this check to cover state changes after rendering.
+            function _rebootWriteAllowed() {
+                var vehicle = controller.vehicle
+                return vehicle
+                        && vehicle.initialConnectComplete
+                        && vehicle.vehicleLinkManager
+                        && !vehicle.vehicleLinkManager.communicationLost
+                        && !vehicle.armed
+                        && !vehicle.flying
+            }
+
             Component {
                 id: batteryFailsafeComponent
 
@@ -134,7 +147,16 @@ SetupPage {
 
                     QGCButton {
                         text:       qsTr("Reboot vehicle")
-                        onClicked:  controller.vehicle.rebootVehicle()
+                        enabled:    flowLayout._rebootWriteAllowed()
+                        onClicked: {
+                            if (!flowLayout._rebootWriteAllowed()) {
+                                mainWindow.showMessageDialog(
+                                            qsTr("Restart blocked"),
+                                            qsTr("Vehicle must be connected, link-ready, disarmed and not flying before restart."))
+                                return
+                            }
+                            controller.vehicle.rebootVehicle()
+                        }
                     }
                 }
             }

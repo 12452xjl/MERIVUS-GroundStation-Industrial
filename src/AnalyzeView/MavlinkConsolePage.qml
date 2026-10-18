@@ -72,7 +72,17 @@ AnalyzePage {
                 return command
             }
 
+            function showCommandBlocked() {
+                mainWindow.showMessageDialog(
+                            qsTr("MAVLink Console 已阻止"),
+                            qsTr("仅允许在已连接、未解锁且未飞行时发送维护命令。"))
+            }
+
             function pasteFromClipboard() {
+                if (!conController.commandAllowed()) {
+                    showCommandBlocked()
+                    return
+                }
                 // we need to handle a few cases here:
                 // in the general form we have: <command_pre><cursor><command_post>
                 // and the clipboard may contain newlines
@@ -224,7 +234,9 @@ AnalyzePage {
                         }
                     }
                     if (event.key == Qt.Key_Enter || event.key == Qt.Key_Return) {
-                        conController.sendCommand(getCommandAndClear())
+                        if (!conController.sendCommand(getCommandAndClear())) {
+                            showCommandBlocked()
+                        }
                         event.accepted = true
                     }
 
@@ -278,7 +290,10 @@ AnalyzePage {
                     inputMethodHints: Qt.ImhNoAutoUppercase
 
                     function sendCommand() {
-                        conController.sendCommand(text)
+                        if (!conController.sendCommand(text)) {
+                            showCommandBlocked()
+                            return
+                        }
                         text = ""
                         scrollToBottom()
                     }

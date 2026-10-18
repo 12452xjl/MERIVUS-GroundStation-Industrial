@@ -29,6 +29,7 @@
 #include "LinkManager.h"
 
 #include <QTcpSocket>
+#include <QThread>
 
 QGC_LOGGING_CATEGORY(APMFirmwarePluginLog, "APMFirmwarePluginLog")
 
@@ -344,6 +345,19 @@ bool APMFirmwarePlugin::adjustIncomingMavlinkMessage(Vehicle* vehicle, mavlink_m
         initializeStreamRates(vehicle);
     }
 
+    return true;
+}
+
+bool APMFirmwarePlugin::parameterSetEncodingMode(int systemId, int componentId, bool& numericFloat) const
+{
+    numericFloat = false;
+    if (QThread::currentThread() != thread() || !qgcApp() || thread() != qgcApp()->thread()
+        || systemId < 1 || systemId > 255 || componentId < 1 || componentId > 255) return false;
+    const auto system = _ardupilotComponentMap.constFind(systemId);
+    if (system != _ardupilotComponentMap.constEnd()) {
+        const auto component = system.value().constFind(componentId);
+        numericFloat = component != system.value().constEnd() && component.value();
+    }
     return true;
 }
 

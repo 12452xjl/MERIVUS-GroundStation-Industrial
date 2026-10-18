@@ -30,7 +30,8 @@ public:
     MavlinkConsoleController();
     virtual ~MavlinkConsoleController();
 
-    Q_INVOKABLE void sendCommand(QString command);
+    Q_INVOKABLE bool sendCommand(QString command);
+    Q_INVOKABLE bool commandAllowed() const;
 
     Q_INVOKABLE QString historyUp(const QString& current);
     Q_INVOKABLE QString historyDown(const QString& current);

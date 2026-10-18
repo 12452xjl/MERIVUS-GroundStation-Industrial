@@ -4,6 +4,7 @@
 #include <QHash>
 #include <QList>
 #include <QObject>
+#include <QString>
 #include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
@@ -94,9 +95,17 @@ private:
         bool missionActive = false;
         bool canRelay = false;
         bool estimatorHealthy = true;
+        bool estimatorHealthKnown = false;
         bool positionHealthy = true;
+        bool positionHealthKnown = false;
         bool hasFault = false;
         QString faultSummary;
+        bool faultHealthKnown = false;
+        int faultEvidenceAgeMs = -1;
+        // Re-anchor the adapter-reported fault age on every refresh. This
+        // prevents a single fresh report from remaining valid forever when
+        // later updates contain only heartbeat fields.
+        QDateTime faultEvidenceObservedUtc;
         QVariantMap metadata;
         bool offlineEventSent = false;
         bool lowBatteryEventSent = false;
@@ -111,6 +120,7 @@ private:
     static bool _readBool(const QVariantMap& report, const QString& key, bool fallback);
     static int _readInt(const QVariantMap& report, const QString& key, int fallback);
     static double _readDouble(const QVariantMap& report, const QString& key, double fallback);
+    static bool _validateReport(const QVariantMap& report, QString* reason = nullptr);
     void _merge(VehicleReport& target, const QVariantMap& updates);
     void _evaluate(VehicleReport& report, const QDateTime& nowUtc,
                    bool emitEvents, QList<QVariantMap>* changedRecommendations);
@@ -121,7 +131,8 @@ private:
     void _emitGlobalRecommendation(const QString& action, const QVariantList& ids,
                                    const QString& reason);
     static bool _isSafeLeaderCandidate(const VehicleReport& report,
-                                       double lowBatteryThreshold);
+                                       double lowBatteryThreshold,
+                                       int offlineTimeoutMs);
     static int _candidateScore(const VehicleReport& report);
 
     QHash<int, VehicleReport> _reports;

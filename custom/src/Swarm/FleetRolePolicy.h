@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QHash>
+#include <QString>
 #include <QStringList>
 #include <QVariantList>
 #include <QVariantMap>
@@ -56,6 +57,11 @@ public:
     Q_INVOKABLE QVariantMap evaluate(const QString& action,
                                      const QString& role = QString()) const;
 
+    // Actual local policy receipt, not caller metadata or authenticated account.
+    // Native consumers freeze this policy instance as well as this value.
+    Q_INVOKABLE QVariantMap actionSnapshot(const QString& action) const;
+    Q_INVOKABLE bool actionSnapshotCurrent(const QVariantMap& receipt) const;
+
     static QString roleToString(Role role);
 
 signals:
@@ -76,9 +82,12 @@ private:
     const RoleDefinition* findRole(const QString& role) const;
     RoleDefinition* findRole(const QString& role);
     QVariantMap roleToVariant(const RoleDefinition& role) const;
+    bool advanceRevision();
 
     QHash<QString, RoleDefinition> _roles;
     QHash<QString, QString> _userRoles;
     QString _currentUserId;
     QString _currentRole;
+    QString _policyEpoch;
+    quint64 _policyRevision = 0; // Mutations never reuse an old confirmation.
 };

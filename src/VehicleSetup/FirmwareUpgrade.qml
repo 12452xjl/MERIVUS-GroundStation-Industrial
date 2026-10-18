@@ -471,7 +471,31 @@ SetupPage {
                 id:         flashBootloaderButton
                 text:       qsTr("Flash ChibiOS Bootloader")
                 visible:    firmwarePage.advanced
-                onClicked:  globals.activeVehicle.flashBootloader()
+                enabled:    globals.activeVehicle
+                            && globals.activeVehicle.initialConnectComplete
+                            && globals.activeVehicle.vehicleLinkManager
+                            && !globals.activeVehicle.vehicleLinkManager.communicationLost
+                            && !globals.activeVehicle.armed
+                            && !globals.activeVehicle.flying
+                onClicked: {
+                    var vehicle = globals.activeVehicle
+                    if (!vehicle || !vehicle.initialConnectComplete || !vehicle.vehicleLinkManager
+                            || vehicle.vehicleLinkManager.communicationLost || vehicle.armed || vehicle.flying) {
+                        return
+                    }
+                    mainWindow.showMessageDialog(qsTr("Flash bootloader"),
+                                                 qsTr("This permanently changes the vehicle bootloader. Confirm the vehicle is grounded, disarmed, externally powered, and that the correct target is selected."),
+                                                 StandardButton.Ok | StandardButton.Cancel,
+                                                 function() {
+                                                     if (globals.activeVehicle === vehicle
+                                                             && vehicle.initialConnectComplete
+                                                             && vehicle.vehicleLinkManager
+                                                             && !vehicle.vehicleLinkManager.communicationLost
+                                                             && !vehicle.armed && !vehicle.flying) {
+                                                         vehicle.flashBootloader()
+                                                     }
+                                                 })
+                }
             }
 
             TextArea {

@@ -23,12 +23,15 @@ class JoystickMavCommand
 public:
     static QList<JoystickMavCommand> load(const QString& jsonFilename);
     QString name() const { return _name; }
+    QString safetyClass() const { return _safetyClass; }
 
-    void send(Vehicle* vehicle);
+    bool send(Vehicle* vehicle);
 private:
+    static QString normalizeSafetyClass(const QString& requested, int commandId);
     QString _name;
     int _id = 0;
     bool _showError = false;
+    QString _safetyClass;
     float _param1 = 0.0f;
     float _param2 = 0.0f;
     float _param3 = 0.0f;
@@ -37,4 +40,3 @@ private:
     float _param6 = 0.0f;
     float _param7 = 0.0f;
 };
-

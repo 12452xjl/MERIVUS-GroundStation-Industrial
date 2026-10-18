@@ -34,8 +34,18 @@ add_library(Vehicle
 	ComponentInformationCache.h
 	ComponentInformationManager.cc
 	ComponentInformationManager.h
+	ComponentMetadataArtifactWorker.cc
+	ComponentMetadataArtifactWorker.h
+	ComponentMetadataWorkScheduler.cc
+	ComponentMetadataWorkScheduler.h
+	ComponentParameterMetadata.cc
+	ComponentParameterMetadata.h
 	ComponentInformationTranslation.cc
 	ComponentInformationTranslation.h
+	ComponentTranslationEngine.cc
+	ComponentTranslationEngine.h
+	ComponentMetadataTranslationWorker.cc
+	ComponentMetadataTranslationWorker.h
 	EventHandler.cc
 	EventHandler.h
 	FTPManager.cc
@@ -69,6 +79,16 @@ add_library(Vehicle
 	VehicleBatteryFactGroup.cc
 	VehicleBatteryFactGroup.h
 	Vehicle.cc
+	FleetStartupOdometry.cc
+	FleetStartupOdometry.h
+	FleetStartupGlobalOrigin.cc
+	FleetStartupGlobalOrigin.h
+	FleetStartupAltitude.cc
+	FleetStartupAltitude.h
+	FleetStartupMemorySeal.cc
+	FleetStartupMemorySeal.h
+	VehicleTelemetryObserver.h
+	VehicleMissionExecutionObserver.h
 	VehicleClockFactGroup.cc
 	VehicleClockFactGroup.h
 	VehicleDistanceSensorFactGroup.cc

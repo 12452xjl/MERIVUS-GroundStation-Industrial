@@ -13,6 +13,7 @@
 #include "QGCMAVLink.h"
 #include <QString>
 #include <QMap>
+#include <QtGlobal>
 
 Q_DECLARE_LOGGING_CATEGORY(StandardModesLog)
 
@@ -58,6 +59,10 @@ private:
 
     bool _requestActive{false};
     bool _wantReset{false};
+    // One whole list/publication identity, not one AVAILABLE_MODES row. Never
+    // reuse a generation after reentrant restart or numeric exhaustion.
+    quint64 _readGeneration{0};
+    bool _readGenerationExhausted{false};
     QMap<uint32_t, Mode> _nextModes; ///< Modes added by current request
 
     bool _hasModes{false};

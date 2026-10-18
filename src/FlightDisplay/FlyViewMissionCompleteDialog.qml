@@ -68,6 +68,29 @@ Item {
                     missionCompleteDialog.close()
                 }
 
+            function _clearPlanGate() {
+                if (!activeVehicleCopy || activeVehicleCopy !== _activeVehicle
+                        || !activeVehicleCopy.initialConnectComplete
+                        || !activeVehicleCopy.vehicleLinkManager
+                        || activeVehicleCopy.vehicleLinkManager.communicationLost) {
+                    return { allowed: false,
+                             message: qsTr("确认的任务清理目标已变化或链路已断开。") }
+                }
+                var controller = globals.guidedControllerFlyView
+                if (!controller || !controller.fleetHealthCenter
+                        || typeof controller.fleetHealthCenter.evaluateTaskGate !== "function") {
+                    return { allowed: false,
+                             message: qsTr("舰队健康门禁尚未就绪，任务清理已阻止。") }
+                }
+                var gate = controller.fleetHealthCenter.evaluateTaskGate(
+                            [Number(activeVehicleCopy.id)], false)
+                return gate && gate.allowed === true
+                        ? { allowed: true }
+                        : { allowed: false,
+                            message: qsTr("UAV-%1 未通过舰队健康门禁，暂不清理机载任务。")
+                                     .arg(activeVehicleCopy.id) }
+            }
+
             ColumnLayout {
                 id:         column
                 width:      40 * ScreenTools.defaultFontPixelWidth
@@ -85,6 +108,11 @@ Item {
                     text:               qsTr("Remove plan from vehicle")
                     visible:            !_activeVehicle.communicationLost// && !_activeVehicle.apmFirmware  // ArduPilot has a bug somewhere with mission clear
                     onClicked: {
+                        var gate = missionCompleteDialog._clearPlanGate()
+                        if (!gate.allowed) {
+                            mainWindow.showMessageDialog(qsTr("任务清理已阻止"), gate.message)
+                            return
+                        }
                         _planController.removeAllFromVehicle()
                         missionCompleteDialog.close()
                     }
@@ -115,7 +143,13 @@ Item {
                         text:               qsTr("Resume Mission From Waypoint %1").arg(globals.guidedControllerFlyView._resumeMissionIndex)
 
                         onClicked: {
-                            globals.guidedControllerFlyView.executeAction(globals.guidedControllerFlyView.actionResumeMission, null, null)
+                            // MERIVUS routes resume through the same frozen
+                            // target and health-gated confirmation flow as
+                            // other mission actions. Calling executeAction()
+                            // directly would bypass the target-frozen
+                            // confirmation path.
+                            globals.guidedControllerFlyView.confirmAction(
+                                        globals.guidedControllerFlyView.actionResumeMission)
                             missionCompleteDialog.close()
                         }
                     }

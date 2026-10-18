@@ -148,33 +148,33 @@ Item {
                     spacing: ScreenTools.defaultFontPixelWidth
 
                     QGCButton {
-                        text:       qsTr("Arm")
+                        text:       qsTr("Arm (Fleet only)")
                         visible:    _vehicle && !_vehicle.armed
-                        onClicked:  _vehicle.armed = true
+                        enabled:    false
                     }
 
                     QGCButton {
                         text:       qsTr("Start Mission")
                         visible:    _vehicle && _vehicle.armed && _vehicle.flightMode !== _vehicle.missionFlightMode
-                        onClicked:  _vehicle.startMission()
+                        onClicked:  _guidedController.confirmAction(_guidedController.actionStartMission, [_vehicle.id])
                     }
 
                     QGCButton {
                         text:       qsTr("Pause")
                         visible:    _vehicle && _vehicle.armed && _vehicle.pauseVehicleSupported
-                        onClicked:  _vehicle.pauseVehicle()
+                        onClicked:  _guidedController.confirmAction(_guidedController.actionPause, { vehicleId: _vehicle.id })
                     }
 
                     QGCButton {
                         text:       qsTr("RTL")
                         visible:    _vehicle && _vehicle.armed && _vehicle.flightMode !== _vehicle.rtlFlightMode
-                        onClicked:  _vehicle.flightMode = _vehicle.rtlFlightMode
+                        onClicked:  _guidedController.confirmAction(_guidedController.actionRTL, [_vehicle.id])
                     }
 
                     QGCButton {
-                        text:       qsTr("Take control")
+                        text:       qsTr("Take control (Fleet only)")
                         visible:    _vehicle && _vehicle.armed && _vehicle.flightMode !== _vehicle.takeControlFlightMode
-                        onClicked:  _vehicle.flightMode = _vehicle.takeControlFlightMode
+                        enabled:    false
                     }
                 } // Row
             } // ColumnLayout
