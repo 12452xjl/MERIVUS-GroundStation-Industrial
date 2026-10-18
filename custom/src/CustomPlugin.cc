@@ -26,6 +26,8 @@
 #include "AiAgentClient.h"
 #include "AiServiceSupervisor.h"
 #include "Diagnostics/MerivusLinkDiagnostics.h"
+#include "Review/ReviewRangeController.h"
+#include "Review/ReviewVideoController.h"
 #include "CommandTransaction.h"
 #include "FaultToleranceManager.h"
 #include "FormationPlanner.h"
@@ -140,6 +142,8 @@ CustomPlugin::CustomPlugin(QGCApplication *app, QGCToolbox* toolbox)
     qmlRegisterType<AiAgentClient>("Merivus", 1, 0, "AiAgentClient");
     qmlRegisterType<AiServiceSupervisor>("Merivus", 1, 0, "AiServiceSupervisor");
     qmlRegisterType<MerivusLinkDiagnostics>("Merivus", 1, 0, "MerivusLinkDiagnostics");
+    qmlRegisterType<ReviewRangeController>("Merivus", 1, 0, "ReviewRangeController");
+    qmlRegisterType<ReviewVideoController>("Merivus", 1, 0, "ReviewVideoController");
     // Mutable command/mission/health services are registered in a separate
     // internal URI. GuidedActionsController is the only QML owner that
     // imports this URI; public panels consume its read-only facades instead

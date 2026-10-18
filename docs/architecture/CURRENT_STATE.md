@@ -1,6 +1,6 @@
 # MERIVUS 当前状态
 
-更新时间：2026-10-06
+更新时间：2026-10-18（发布分支源码整合；本次未复跑构建或测试）
 
 Fleet OS 目标的逐项源码 groundwork、当前缺口和验收边界以
 [`MERIVUS_FLEET_OS_ROADMAP.md`](../MERIVUS_FLEET_OS_ROADMAP.md) 与

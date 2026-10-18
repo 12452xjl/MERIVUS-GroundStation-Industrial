@@ -47,6 +47,8 @@ SOURCES += \
     $$PWD/src/Ai/AiServiceSupervisor.cc \
     $$PWD/src/CustomPlugin.cc \
     $$PWD/src/Diagnostics/MerivusLinkDiagnostics.cc \
+    $$PWD/src/Review/ReviewRangeController.cc \
+    $$PWD/src/Review/ReviewVideoController.cc \
     $$PWD/src/Swarm/CommandTransaction.cc \
     $$PWD/src/Swarm/FaultToleranceManager.cc \
     $$PWD/src/Swarm/FormationPlanner.cc \
@@ -196,6 +198,9 @@ HEADERS += \
     $$PWD/src/Ai/AiServiceSupervisor.h \
     $$PWD/src/CustomPlugin.h \
     $$PWD/src/Diagnostics/MerivusLinkDiagnostics.h \
+    $$PWD/src/Review/ReviewRangeController.h \
+    $$PWD/src/Review/ReviewRangeMath.h \
+    $$PWD/src/Review/ReviewVideoController.h \
     $$PWD/src/Swarm/CommandTransaction.h \
     $$PWD/src/Swarm/FaultToleranceManager.h \
     $$PWD/src/Swarm/FormationPlanner.h \
@@ -340,6 +345,7 @@ INCLUDEPATH += \
     $$PWD/src \
     $$PWD/src/Ai \
     $$PWD/src/Diagnostics \
+    $$PWD/src/Review \
     $$PWD/src/Swarm \
     $$PWD/src/FirmwarePlugin \
     $$PWD/src/AutoPilotPlugin

@@ -1,5 +1,13 @@
 # MERIVUS GroundStation
 
+## 组织仓库源码审阅分支（2026-10-18）
+
+按用户最新授权，本分支向 `Merivus-Industrial/MERIVUS-GroundStation` 提交完整本地源码供人工审阅。交付源码基于 `006199c`，快照提交为 `51c2b58`；已整合目标主分支 `ffe42d8` 的既有更新，保留 FTC 遥测、视频/范围复盘与 Linux 打包接线。原始本地工作树和已交付 ZIP 未被本次整合覆盖。
+
+本次只直接静读、解决合并冲突及核对文件/资源/空白；未编译、运行测试、仿真或刷机，不合并主分支。提交使用 `[skip ci]` 标记。下方各历史段的“未提交/推送/更新PR”描述对应当时封包状态，本次发布授权以本节为准；目标仓库历史构建/FTC验证记录不代表本次整合版本已验证。
+
+请先看[本次整合记录](docs/handoff/MERIVUS_INDUSTRIAL_SOURCE_SUBMISSION_20261018.md)、[最终交付范围与外部未完成项](docs/handoff/MERIVUS_FLEET_DELIVERY_SCOPE.md)及[工程师交接](docs/handoff/MERIVUS_SWARM_ENGINEER_HANDOFF.md)。完整25项目标并未因此全部落地。
+
 ## 546：最终本地源码交接
 
 按用户确认，本次交付限定为本地地面站源码与工程交接文档；外部接口、跨站服务、动态插件运行时及实测验证明确保留为未完成项，不宣称原25项完整产品能力全部落地。
@@ -1479,10 +1487,26 @@ AI/LLM 不发送 MAVLink、不修改 PX4 参数，也不调用 Vehicle 或 Swarm
 
 2026-10-14 源码增量234–238加入[启动前整组任务只读核对](custom/src/Swarm/FleetMissionStartContentCheck.md)：实际原始INT全读/完整载荷核对与最早READ START时效接入现有面板及独立风险审阅，旧批准先撤销，不自动恢复或续期。它不是StartPermit、原子机载快照或任务完成证明；未编译、运行、测试、修改飞控或更新PR/安装包。完整25目标/六类剩余源码范围见[路线图](docs/MERIVUS_FLEET_OS_ROADMAP.md)。
 
+基于 QGroundControl 的多无人机调度地面站，由 **[Ale-xl](https://github.com/Ale-xl)** 维护。配套飞控为 [MERIVUS-FirmwarePX4](https://github.com/Ale-xl/MERIVUS-FirmwarePX4)。本仓库包含界面、人工多机调度、FTC 遥测展示，以及只提供建议的本机 AI Agent。
+
+> 当前为开发测试版本 `0.1.0-dev.1`，不是生产发行版。已有代码、历史验证和本次验证是不同状态；FTC 主动控制与植保覆盖作业均不能因界面或方案存在而视为已经验收。
+
+## 当前能力与边界
+
+| 范围 | 当前内容 | 限制 |
+| --- | --- | --- |
+| 地面站 | QGC Custom Build、地图、飞行器选择、链路与状态展示 | 沿用 QGC/PX4 原生安全流程 |
+| 人工多机调度 | 明确目标的任务交互与编队协议 | 需要 Mock/SITL 和现场分阶段验证 |
+| FTC 遥测 | 四类自定义 MAVLink 消息、类型化后端、状态面板、协议和过期判断 | 只展示飞控报告，不代表主动控制已验证 |
+| 本机 AI Agent | FastAPI、Mock/Ollama、C++ 客户端与服务监管器、Schema/Policy 校验 | `ActionProposal` 保持 `executable=false`，不进入飞行执行链 |
+| 植保区域覆盖 | [ADR-0001 设计方案](docs/adr/0001-plant-protection-area-coverage.md) | 待实现与验证，不包含喷洒设备控制 |
+
+AI/LLM 不发送 MAVLink、不修改 PX4 参数，也不调用 Vehicle 或 Swarm 的飞行动作入口。云设备网关、生产认证、GIS Safety Service、真实命令执行器及安装包签名尚未完成。
+
 ## 获取源码
 
 ```sh
-git clone https://github.com/Ale-xl/MERIVUS-GroundStation.git GroundStation
+git clone https://github.com/Merivus-Industrial/MERIVUS-GroundStation.git GroundStation
 git clone --recursive https://github.com/Ale-xl/MERIVUS-FirmwarePX4.git FirmwarePX4
 ```
 
