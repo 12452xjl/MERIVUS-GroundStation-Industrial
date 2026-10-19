@@ -210,15 +210,15 @@ ColumnLayout {
                     readonly property var row:modelData
                     QGCLabel { Layout.fillWidth:true; textFormat:Text.PlainText; wrapMode:Text.Wrap; text:qsTr("机 %1 · 起飞类型 %2 · 几何 %3\n原因：%4\n%5").arg(row.vehicleId).arg(root.text(row.launchType)).arg(row.availability === "available" ? qsTr("可展示") : row.availability === "partial" ? qsTr("部分可展示") : qsTr("不可用"))
                         .arg(row.reasonCodes.length ? row.reasonCodes.join("；") : qsTr("无几何拒绝原因；未认证边界仍存在")).arg(root.geometryText(row)) }
-                    QGCButton { Layout.fillWidth:true; Layout.minimumHeight:root.rowHeight; focusPolicy:Qt.StrongFocus; text:root.detailVehicleId===row.vehicleId ? qsTr("收起该机高度依据") : qsTr("展开该机原始高度依据 / 推导边界"); onClicked:{root.detailVehicleId=root.detailVehicleId===row.vehicleId ? 0 : row.vehicleId;root.focusAfterLayout(this)}; onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this) }
+                    QGCButton { Layout.fillWidth:true; Layout.minimumHeight:root.rowHeight; focusPolicy:Qt.StrongFocus; text:root.detailVehicleId===row.vehicleId ? qsTr("收起该机高度依据") : qsTr("展开该机原始高度依据 / 推导边界"); onClicked:{root.detailVehicleId=root.detailVehicleId===row.vehicleId ? 0 : row.vehicleId;root.focusAfterLayout(this)} onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this) }
                     QGCLabel { Layout.fillWidth:true; visible:root.detailVehicleId===row.vehicleId; textFormat:Text.PlainText; wrapMode:Text.Wrap; text:visible ? JSON.stringify({currentAltitudeSummary:row.currentAltitudeSummary,takeoffDerivation:row.takeoffDerivation},null,2) : "" }
                 }
             }
             QGCLabel { Layout.fillWidth:true; textFormat:Text.PlainText; wrapMode:Text.WordWrap; text:qsTr("逐机第 %1 / %2 页；每页最多 8 架。").arg(root.vehiclePage+1).arg(Math.max(1,Math.ceil(root.vehicles.length/8))) }
             RowLayout {
                 Layout.fillWidth:true
-                QGCButton { Layout.fillWidth:true; Layout.minimumHeight:root.rowHeight; focusPolicy:Qt.StrongFocus; text:qsTr("上一组飞机"); enabled:root.vehiclePage>0; opacity:enabled?1:0.45; onClicked:{root.vehiclePage-=1;root.detailVehicleId=0;root.focusAfterLayout(this)}; onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this) }
-                QGCButton { Layout.fillWidth:true; Layout.minimumHeight:root.rowHeight; focusPolicy:Qt.StrongFocus; text:qsTr("下一组飞机"); enabled:(root.vehiclePage+1)*8<root.vehicles.length; opacity:enabled?1:0.45; onClicked:{root.vehiclePage+=1;root.detailVehicleId=0;root.focusAfterLayout(this)}; onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this) }
+                QGCButton { Layout.fillWidth:true; Layout.minimumHeight:root.rowHeight; focusPolicy:Qt.StrongFocus; text:qsTr("上一组飞机"); enabled:root.vehiclePage>0; opacity:enabled?1:0.45; onClicked:{root.vehiclePage-=1;root.detailVehicleId=0;root.focusAfterLayout(this)} onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this) }
+                QGCButton { Layout.fillWidth:true; Layout.minimumHeight:root.rowHeight; focusPolicy:Qt.StrongFocus; text:qsTr("下一组飞机"); enabled:(root.vehiclePage+1)*8<root.vehicles.length; opacity:enabled?1:0.45; onClicked:{root.vehiclePage+=1;root.detailVehicleId=0;root.focusAfterLayout(this)} onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this) }
             }
             QGCLabel { Layout.fillWidth:true; font.bold:true; textFormat:Text.PlainText; wrapMode:Text.WordWrap; text:qsTr("跨机名义空间接近候选（时间未知）") }
             QGCLabel { Layout.fillWidth:true; textFormat:Text.PlainText; wrapMode:Text.Wrap; text:root.separation.comparisonComplete === true
@@ -230,8 +230,8 @@ ColumnLayout {
             Repeater { model:root.expanded ? root.shownCandidates : []; QGCLabel { Layout.fillWidth:true; textFormat:Text.PlainText; wrapMode:Text.Wrap; text:qsTr("机 %1 [%2] ↔ 机 %3 [%4]：名义最近距离 %5 m；无同时到达证据。").arg(modelData.vehicleA).arg(modelData.segmentA).arg(modelData.vehicleB).arg(modelData.segmentB).arg(modelData.distanceMeters) } }
             RowLayout {
                 Layout.fillWidth:true; visible:root.candidates.length>8
-                QGCButton { Layout.fillWidth:true; Layout.minimumHeight:root.rowHeight; focusPolicy:Qt.StrongFocus; text:qsTr("上一页候选"); enabled:root.candidatePage>0; opacity:enabled?1:0.45; onClicked:{root.candidatePage-=1;root.focusAfterLayout(this)}; onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this) }
-                QGCButton { Layout.fillWidth:true; Layout.minimumHeight:root.rowHeight; focusPolicy:Qt.StrongFocus; text:qsTr("下一页候选"); enabled:(root.candidatePage+1)*8<root.candidates.length; opacity:enabled?1:0.45; onClicked:{root.candidatePage+=1;root.focusAfterLayout(this)}; onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this) }
+                QGCButton { Layout.fillWidth:true; Layout.minimumHeight:root.rowHeight; focusPolicy:Qt.StrongFocus; text:qsTr("上一页候选"); enabled:root.candidatePage>0; opacity:enabled?1:0.45; onClicked:{root.candidatePage-=1;root.focusAfterLayout(this)} onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this) }
+                QGCButton { Layout.fillWidth:true; Layout.minimumHeight:root.rowHeight; focusPolicy:Qt.StrongFocus; text:qsTr("下一页候选"); enabled:(root.candidatePage+1)*8<root.candidates.length; opacity:enabled?1:0.45; onClicked:{root.candidatePage+=1;root.focusAfterLayout(this)} onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this) }
             }
             QGCLabel { Layout.fillWidth:true; textFormat:Text.PlainText; wrapMode:Text.Wrap; text:root.captured ? qsTr("投影依据：%1\n未认证项：%2\n以上接近候选只比较启动参考段，不覆盖下方完整任务出航、返程或终结下降。").arg(JSON.stringify(root.separation.projection||{},null,2)).arg(root.view.limitations.join("；")) : "" }
             FleetMissionSpatialPanel {

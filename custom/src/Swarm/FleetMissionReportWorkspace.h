@@ -15,7 +15,7 @@ class FleetMissionReportWorkspaceWorker;
 
 // Independent read-only review dossiers. Never a protected actual Run report,
 // permission source, PlanStore import or a caller-supplied executable plan.
-class FleetMissionReportWorkspace final : public QObject
+class FleetMissionReportWorkspace : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(QVariantMap state READ state NOTIFY changed)

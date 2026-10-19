@@ -12,7 +12,7 @@ class FleetUserTaskTemplatesWorker;
 
 // User-owned reusable EDITING states, deliberately separate from the trusted
 // task-template registry. Neither a record nor a file restores flight authority.
-class FleetUserTaskTemplates final : public QObject
+class FleetUserTaskTemplates : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(QVariantMap state READ state NOTIFY changed)

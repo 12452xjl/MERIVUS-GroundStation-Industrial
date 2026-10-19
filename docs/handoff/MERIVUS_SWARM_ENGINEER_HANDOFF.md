@@ -1,5 +1,51 @@
 # MERIVUS 集群地面站工程师交接说明
 
+## 2026-10-19：PR #6 修复后 Ubuntu 复测
+
+本次只修确定的 Qt 5.15 类型注册及 QML 兼容性问题，详见[23路径清单](MERIVUS_SWARM_PATCH_MANIFEST.md)与[实际核验边界](MERIVUS_SWARM_STATIC_AUDIT.md)。本机73个 QML/JS 语法检查、两个真实类型注册模板的仅语法编译通过；**没有完整地面站构建、启动或 SITL 通过结论**。
+
+### 取得同一个 PR 的新版本
+
+用户克隆的 `origin` 为 `12452xjl/MERIVUS-GroundStation-Industrial`，本次仍更新原分支 `merivus/source-handoff-20261018`，不改 PR #7，不合并组织仓库主分支。先检查并保存本地修改，不运行 `reset --hard` 或覆盖旧工作区；以下新分支名若已存在，请换一个未使用的名字。
+
+```bash
+git status --short
+git fetch origin merivus/source-handoff-20261018
+git switch --create review/pr6-qt515-20261019 origin/merivus/source-handoff-20261018
+git log -1 --oneline
+```
+
+### 固定实际 Qt 工具链并使用新的构建目录
+
+截图 Qt Creator 使用 `$HOME/Qt/5.15.2/gcc_64`，但终端默认 qmake 是5.12.8；请显式选用前者。若安装位置不同，修改下面的 `task_qt_dir`，不要通过禁用项目版本检查混用工具链。
+
+```bash
+task_qt_dir="$HOME/Qt/5.15.2/gcc_64"
+set -o pipefail
+"$task_qt_dir/bin/qmake" -v
+find custom -type f \( -name '*.qml' -o -name '*.js' \) -print0 \
+  | xargs -0 "$task_qt_dir/bin/qmllint"
+
+task_src_dir="$PWD"
+task_build_dir=$(mktemp -d "$task_src_dir/../build-pr6-qt515-20261019.XXXXXX") || exit
+cd "$task_build_dir" || exit
+if "$task_qt_dir/bin/qmake" -r "$task_src_dir/qgroundcontrol.pro" CONFIG+=debug CONFIG+=DailyBuild 2>&1 | tee qmake-pr6.log; then
+    make -j2 2>&1 | tee build-pr6.log
+fi
+```
+
+上述命令供工程师手动执行；本次没有在虚拟机代执行，也未安装或替换工具链。新的目录保留旧构建产物，避免把旧 Makefile、moc 或对象文件误当作本次结果。
+
+### 仍需工程师验证并反馈
+
+1. 完整 C++/moc/资源构建与链接；先处理实际构建输出中的第一个根因，不只统计 Qt Creator 问题数量。
+2. 成功构建后启动地面站，检查实际 QML 模块、绑定和面板创建；特别打开归档、备用出勤及配置界面，确认无 FINAL 属性覆盖及只读属性赋值错误。
+3. 检查按钮按下、取消、禁用后清理与释放动作；快照改名不应改变原确认/来源校验及高亮表现。
+4. 地面站正常启动后，再由工程师在隔离仿真环境验证现有 PX4 + Gazebo SITL 连接；构建通过不等于集群、故障恢复或实机安全验证通过。
+5. 如仍失败，请提供 `git rev-parse HEAD`、实际 Kit/Qt/GCC 版本、完整 `qmake-pr6.log`、`build-pr6.log` 及启动日志，不只提供问题列表截图。
+
+下方546及更早的功能验证清单仍有效，不能因本次限定语法检查而标成已通过。
+
 ## 546：最终源码交接——本轮38项全部未执行
 
 用户确认只交本地源码，外部系统和真实验证不在本轮冒充完成；先读[最终范围](MERIVUS_FLEET_DELIVERY_SCOPE.md)。本轮五条操作链位于现指挥中心、规划器、运行报告和归档维护区；源码静读不能代替下面的工程验证。

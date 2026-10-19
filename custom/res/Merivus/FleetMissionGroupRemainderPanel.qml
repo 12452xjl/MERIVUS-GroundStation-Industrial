@@ -443,7 +443,7 @@ ColumnLayout {
             QGCLabel { Layout.fillWidth: true; text: qsTr("此成员的新执行配置JSON（空对象不继承原配置，最多16384字符）"); wrapMode: Text.WordWrap }
             Controls.TextArea { Layout.fillWidth: true; Layout.minimumHeight: root.rowHeight * 3; text: root.editor.profileText || ""; enabled: !root.editingLocked && !root.callBusy; selectByMouse: true; wrapMode: TextEdit.Wrap; color: qgcPal.text; Accessible.name: qsTr("当前成员新执行配置JSON"); onTextChanged: if (activeFocus && text !== (root.editor.profileText || "")) root.edit("profileText", text); onActiveFocusChanged: if (activeFocus) root.focusVisibilityRequested(this) }
             QGCLabel { Layout.fillWidth: true; text: qsTr("明确新备用ID数组（JSON，如 [7,8]；不自动取消原最低备用数量或其它政策）"); wrapMode: Text.WordWrap }
-            QGCTextField { Layout.fillWidth: true; Layout.minimumHeight: root.rowHeight; text: root.reserveText; enabled: !root.editingLocked && !root.callBusy; onTextEdited: { root.reserveText = text; root.changed() }; Accessible.name: qsTr("新备用机ID数组") }
+            QGCTextField { Layout.fillWidth: true; Layout.minimumHeight: root.rowHeight; text: root.reserveText; enabled: !root.editingLocked && !root.callBusy; onTextEdited: { root.reserveText = text; root.changed() } Accessible.name: qsTr("新备用机ID数组") }
             QGCLabel { Layout.fillWidth: true; textFormat: Text.PlainText; wrapMode: Text.WordWrap; text: qsTr("完整新备用配置JSON（最多32768字符，每个ID恰一项）：vehicleId、start、returnTo、reservePlan。两端点须为自身完整geodetic / amsl坐标；策略须含schemaVersion=1、replacementVehicleId（新执行机）、standbyMode、standbyDurationSeconds、standbyConsumptionFactor及cruise / climb / descentSpeedMetersPerSecond。显式替换旧备用运行配置，绝不自动重绑旧机号或端点；仍须全新能力／能量审阅。") }
             Controls.TextArea {
                 Layout.fillWidth: true; Layout.minimumHeight: root.rowHeight * 3

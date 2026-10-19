@@ -1,5 +1,11 @@
 # MERIVUS 工程交接入口
 
+## 2026-10-19：PR #6 构建反馈修复
+
+先阅读[本次修改清单](MERIVUS_SWARM_PATCH_MANIFEST.md)、[限定核验结果](MERIVUS_SWARM_STATIC_AUDIT.md)和[Ubuntu / Qt 5.15.2 复测说明](MERIVUS_SWARM_ENGINEER_HANDOFF.md)。本次修复18个源码文件中的 Qt 类型注册、QML 分号、保留字和按钮属性冲突，只更新同一个 PR #6，不合并主分支。
+
+本机已执行离线语法核验，未完成地面站整体编译、启动或 PX4 + Gazebo SITL 集成验证。历史批次中的“未执行解析或编译”只描述当时状态，不替代本次明确列出的有限检查，也不能用本次语法检查覆盖历史待验项。
+
 ## 546：最终本地源码交接阅读顺序
 
 1. [最终范围与外部未完成项](MERIVUS_FLEET_DELIVERY_SCOPE.md)：用户已确认本地源码交付，不等于25项完整产品验收。

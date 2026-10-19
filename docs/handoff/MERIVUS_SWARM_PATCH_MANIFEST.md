@@ -1,5 +1,34 @@
 # MERIVUS 集群地面站补丁清单
 
+## 2026-10-19：PR #6 Qt 5.15 兼容性修复（23路径）
+
+18源码＋5说明文件。基线 `7c01743fe0b94e65e3ac5a535a076f9ebfece381`；只修用户构建反馈中已确定的问题，不改业务条件、接口或飞行权限，不扩大交付范围。
+
+| 源码路径 | 本次改动 |
+|---|---|
+| `custom/src/Swarm/FleetUserTaskTemplates.h` | 删除 class 的 `final`，允许 Qt 5 的可创建类型包装类继承 |
+| `custom/src/Swarm/FleetMissionReportWorkspace.h` | 同上；原构造与 `qmlRegisterType` 不变 |
+| `custom/res/Merivus/GuidedActionsController.qml` | 局部 `synchronized` 改 `identitySynchronized`，`native` 改 `nativeState`，同步全部局部引用 |
+| `custom/res/Merivus/FleetArchiveHistoryPanel.qml` | 删除12处块外多余分号 |
+| `custom/res/Merivus/FleetArchiveMaintenancePanel.qml` | 删除16处块外多余分号 |
+| `custom/res/Merivus/FleetArchiveTaskHistoryPanel.qml` | 删除5处块外多余分号 |
+| `custom/res/Merivus/FleetDeploymentArchivePanel.qml` | 删除14处块外多余分号，保留合法对象字面量赋值分号 |
+| `custom/res/Merivus/FleetGnssMemoryWorkspacePanel.qml` | 删除1处滚动条对象绑定后的多余分号 |
+| `custom/res/Merivus/FleetHandoffPanel.qml` | 删除2处块外多余分号 |
+| `custom/res/Merivus/FleetMaintenanceHistoryPanel.qml` | 删除4处块外多余分号 |
+| `custom/res/Merivus/FleetMissionGroupRemainderPanel.qml` | 删除1处块外多余分号 |
+| `custom/res/Merivus/FleetMissionRemainderPanel.qml` | 删除2处块外多余分号 |
+| `custom/res/Merivus/FleetMissionSpatialPanel.qml` | 删除7处块外多余分号 |
+| `custom/res/Merivus/FleetMissionStartupSpatialPanel.qml` | 删除5处块外多余分号 |
+| `custom/res/Merivus/FleetRetiredArchivePurgePanel.qml` | 删除6处块外多余分号 |
+| `custom/res/Merivus/FleetTelemetryHistoryPanel.qml` | 删除9处块外多余分号 |
+| `custom/res/Merivus/FleetReserveDispatchPanel.qml` | 删除1处块外多余分号；3个按钮快照属性及局部读写改为 `pressedIntent` |
+| `custom/res/Merivus/FleetReserveDispatchProfileEditor.qml` | 删除3处块外多余分号；2个按钮快照属性及局部读写改为 `pressedIntent` |
+
+说明文件为 `MODIFIED_FILES.md`、`docs/handoff/README.md`、本清单、`MERIVUS_SWARM_STATIC_AUDIT.md`、`MERIVUS_SWARM_ENGINEER_HANDOFF.md`。本次源码差异为105行删除及105行新增，行数包括原长行的最小替换，不代表新增算法或功能。
+
+实际检查及未完成验证见[本次审计](MERIVUS_SWARM_STATIC_AUDIT.md)。以下546及更早内容保留为历史，不能视为本次版本的构建结果。
+
 ## 546：最终本地源码收口清单
 
 本轮去重52路径：26源码/工程登记＋26文档。是545之后五条操作链及最终范围说明的增量，不是此前全部开发总数，不用于推算进度。完整交接以最终源码树为准，不仅本表列出的文件；外部条件见[最终范围](MERIVUS_FLEET_DELIVERY_SCOPE.md)。

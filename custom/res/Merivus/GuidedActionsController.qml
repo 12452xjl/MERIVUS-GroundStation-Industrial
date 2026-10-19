@@ -10425,11 +10425,11 @@ Item {
             return {ok: false, reason: "actual_identity_source_required", flightCommandReleased: false}
         var result = scope.session.authenticateOperator()
         if (!guard.alive || !_fleetIdentityScopeCurrent(scope)) return result
-        var synchronized = _syncFleetOperatorIdentity(scope.session)
+        var identitySynchronized = _syncFleetOperatorIdentity(scope.session)
         if (!guard.alive || !_fleetIdentityScopeCurrent(scope)) return result
         result.nativeAuthenticationAccepted = result.ok === true
-        result.identityAppliedToChosenSource = synchronized === true
-        if (!synchronized) { result.ok = false; result.reason = "authenticated_identity_not_applied_to_chosen_source" }
+        result.identityAppliedToChosenSource = identitySynchronized === true
+        if (!identitySynchronized) { result.ok = false; result.reason = "authenticated_identity_not_applied_to_chosen_source" }
         _fleetEventBlackBox.record("operator.authentication_result", {
             accepted: result.ok === true, source: "windows-local-authentication",
             reason: String(result.reason || result.errorCode || "").substring(0, 128), flightCommandReleased: false
@@ -11279,11 +11279,11 @@ Item {
 
     function _fleetSavedDraftProjection() {
         var publication = _fleetSavedDraftState.publication, result = _fleetRepairDraftProjection()
-        var native = _fleetMissionDraftStore.current, preview = _fleetRepairDraftState.data.preview
+        var nativeState = _fleetMissionDraftStore.current, preview = _fleetRepairDraftState.data.preview
         var sourceCurrent = !!preview && preview.sourceKind === "saved-draft" && _fleetRepairDraftPreviewCurrent(preview)
         var save = _fleetSavedDraftState.data.savePreview, saveCurrent = _fleetSavedSavePreviewCurrent(save)
         result.busy = result.busy || _fleetMissionDraftStore.busy
-        result.store = _fleetSavedNativePreviewKnown(native) ? JSON.parse(JSON.stringify(native)) : {}
+        result.store = _fleetSavedNativePreviewKnown(nativeState) ? JSON.parse(JSON.stringify(nativeState)) : {}
         result.saveCurrent = saveCurrent; result.saveToken = saveCurrent ? save.token : ""
         result.sourceCurrent = sourceCurrent; result.sourceToken = sourceCurrent ? preview.token : ""
         result.source = sourceCurrent ? {checkpointId: preview.source.checkpointId, checkpointRevision: preview.source.checkpointRevision,

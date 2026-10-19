@@ -834,11 +834,11 @@ ColumnLayout {
                 Layout.fillWidth:true; Layout.minimumHeight:root.rowHeight; focusPolicy:Qt.StrongFocus
                 enabled:root.refreshAllowed&&root.refreshConsent
                 text:qsTr("显式刷新所选备用机版本和29项参数"); Accessible.name:text
-                property var pressed:null
-                onPressed:pressed=root.intent("refresh")
-                onCanceled:pressed=null
-                onEnabledChanged:if(!enabled)pressed=null
-                onClicked:{var g=root.life,v=pressed;pressed=null;if(g.alive)root.startRefresh(v)}
+                property var pressedIntent:null
+                onPressed:pressedIntent=root.intent("refresh")
+                onCanceled:pressedIntent=null
+                onEnabledChanged:if(!enabled)pressedIntent=null
+                onClicked:{var g=root.life,v=pressedIntent;pressedIntent=null;if(g.alive)root.startRefresh(v)}
                 contentItem:QGCLabel{text:parent.text;font.underline:parent.activeFocus;color:parent._showHighlight?qgcPal.buttonHighlightText:qgcPal.buttonText;textFormat:Text.PlainText;wrapMode:Text.WordWrap;horizontalAlignment:Text.AlignHCenter}
             }
             QGCLabel {
@@ -873,16 +873,16 @@ ColumnLayout {
                 visible:!!root.refreshJob&&root.refreshBusy
                 enabled:!!root.refreshJob&&(!root.callBusy||!root.refreshJob.requestId)
                 text:qsTr("精确取消本页原刷新（不撤回已发）"); Accessible.name:text
-                property var pressed:null
-                onPressed:pressed=root.refreshCancelIntent()
-                onCanceled:pressed=null
-                onEnabledChanged:if(!enabled)pressed=null
-                onClicked:{var g=root.life,v=pressed;pressed=null;if(g.alive)root.cancelRefresh(v)}
+                property var pressedIntent:null
+                onPressed:pressedIntent=root.refreshCancelIntent()
+                onCanceled:pressedIntent=null
+                onEnabledChanged:if(!enabled)pressedIntent=null
+                onClicked:{var g=root.life,v=pressedIntent;pressedIntent=null;if(g.alive)root.cancelRefresh(v)}
                 contentItem:QGCLabel{text:parent.text;font.underline:parent.activeFocus;color:parent._showHighlight?qgcPal.buttonHighlightText:qgcPal.buttonText;textFormat:Text.PlainText;wrapMode:Text.WordWrap;horizontalAlignment:Text.AlignHCenter}
             }
             Controls.CheckBox { Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;enabled:root.ready&&!root.editingLocked&&root.selectedReserveId>0;checked:root.observeConsent;onToggled:root.observeConsent=checked;text:qsTr("确认仅读取所选机当前依据");Accessible.name:text }
             QGCLabel {Layout.fillWidth:true;text:qsTr("只读当前实际参数缓存，不请求参数刷新、不写参数；先撤本页旧依据，成功后退休旧提案资格；失败不恢复依据，原提案／归档事实保留。没有旧主机profile、手填hash或自动选择的备用机。");textFormat:Text.PlainText;wrapMode:Text.WordWrap}
-            QGCButton {Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;enabled:root.ready&&!root.editingLocked&&root.observeConsent&&root.selectedReserveId>0&&!profileEditor.startupPending;text:qsTr("读取本次参数依据");Accessible.name:text;property var pressed:null;onPressed:pressed=root.intent("observe");onCanceled:pressed=null;onClicked:{var g=root.life,v=pressed;pressed=null;if(g.alive)root.observeProfile(v)};contentItem:QGCLabel{text:parent.text;font.underline:parent.activeFocus;color:parent._showHighlight?qgcPal.buttonHighlightText:qgcPal.buttonText;textFormat:Text.PlainText;wrapMode:Text.WordWrap;horizontalAlignment:Text.AlignHCenter}}
+            QGCButton {Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;enabled:root.ready&&!root.editingLocked&&root.observeConsent&&root.selectedReserveId>0&&!profileEditor.startupPending;text:qsTr("读取本次参数依据");Accessible.name:text;property var pressedIntent:null;onPressed:pressedIntent=root.intent("observe");onCanceled:pressedIntent=null;onClicked:{var g=root.life,v=pressedIntent;pressedIntent=null;if(g.alive)root.observeProfile(v)} contentItem:QGCLabel{text:parent.text;font.underline:parent.activeFocus;color:parent._showHighlight?qgcPal.buttonHighlightText:qgcPal.buttonText;textFormat:Text.PlainText;wrapMode:Text.WordWrap;horizontalAlignment:Text.AlignHCenter}}
             QGCLabel {Layout.fillWidth:true;visible:profileEditor.startupPending;text:qsTr("启动策略仍有未采用表单；先继续编辑并明确采用或放弃，再重新读取参数。重读不是采用策略。");textFormat:Text.PlainText;wrapMode:Text.WordWrap}
             FleetReserveDispatchProfileEditor {
                 id:profileEditor

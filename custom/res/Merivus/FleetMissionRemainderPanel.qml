@@ -556,7 +556,7 @@ ColumnLayout {
                 onActiveFocusChanged: if (activeFocus) root.focusVisibilityRequested(this)
                 background: Rectangle { color: qgcPal.windowShade; border.color: parent.activeFocus ? qgcPal.buttonHighlight : qgcPal.text; border.width: parent.activeFocus ? 2 : 1; radius: 3 }
             }
-            QGCCheckBox { Layout.fillWidth: true; text: qsTr("确认人工裁剪与新输入"); checked: root.previewConfirmed; enabled: root.ready && !root.editingLocked; onClicked: { root.previewConfirmed = checked; checked = Qt.binding(function() { return root.previewConfirmed }) }; onActiveFocusChanged: if (activeFocus) root.focusVisibilityRequested(this) }
+            QGCCheckBox { Layout.fillWidth: true; text: qsTr("确认人工裁剪与新输入"); checked: root.previewConfirmed; enabled: root.ready && !root.editingLocked; onClicked: { root.previewConfirmed = checked; checked = Qt.binding(function() { return root.previewConfirmed }) } onActiveFocusChanged: if (activeFocus) root.focusVisibilityRequested(this) }
             QGCButton {
                 id: previewButton
                 Layout.fillWidth: true; Layout.minimumHeight: root.rowHeight; text: qsTr("生成单成员余段预览")
@@ -570,7 +570,7 @@ ColumnLayout {
         ColumnLayout {
             Layout.fillWidth: true; visible: root.proposalCurrent
             QGCLabel { Layout.fillWidth: true; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.summaryText(root.proposal.summary) }
-            QGCCheckBox { Layout.fillWidth: true; text: qsTr("确认生成新的实际审阅版本"); checked: root.reviewConfirmed; enabled: root.ready && !root.editingLocked; onClicked: { root.reviewConfirmed = checked; checked = Qt.binding(function() { return root.reviewConfirmed }) }; onActiveFocusChanged: if (activeFocus) root.focusVisibilityRequested(this) }
+            QGCCheckBox { Layout.fillWidth: true; text: qsTr("确认生成新的实际审阅版本"); checked: root.reviewConfirmed; enabled: root.ready && !root.editingLocked; onClicked: { root.reviewConfirmed = checked; checked = Qt.binding(function() { return root.reviewConfirmed }) } onActiveFocusChanged: if (activeFocus) root.focusVisibilityRequested(this) }
             QGCButton {
                 id: reviewButton
                 Layout.fillWidth: true; Layout.minimumHeight: root.rowHeight; text: qsTr("把此精确子提案送入实际审阅")

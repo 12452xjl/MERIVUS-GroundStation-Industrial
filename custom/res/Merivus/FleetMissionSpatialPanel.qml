@@ -387,8 +387,8 @@ ColumnLayout {
             }
             RowLayout {
                 Layout.fillWidth:true;spacing:root.pad
-                QGCButton{Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;text:qsTr("上一页条目");enabled:root.currentPage>0;opacity:enabled?1:0.45;onClicked:{root.page=root.currentPage-1;root.afterLayout(this)};onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)}
-                QGCButton{Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;text:qsTr("下一页条目");enabled:root.currentPage+1<root.pageCount;opacity:enabled?1:0.45;onClicked:{root.page=root.currentPage+1;root.afterLayout(this)};onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)}
+                QGCButton{Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;text:qsTr("上一页条目");enabled:root.currentPage>0;opacity:enabled?1:0.45;onClicked:{root.page=root.currentPage-1;root.afterLayout(this)}onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)}
+                QGCButton{Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;text:qsTr("下一页条目");enabled:root.currentPage+1<root.pageCount;opacity:enabled?1:0.45;onClicked:{root.page=root.currentPage+1;root.afterLayout(this)}onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)}
             }
             QGCLabel{Layout.fillWidth:true;textFormat:Text.PlainText;wrapMode:Text.Wrap;text:qsTr("归档规划空域：报告可展示 %1；禁飞区输入状态 %2；记录数量 %3；间距 %4 m / 来源 %5。\n原报告仍只覆盖当时规划路线，不因下方新分析扩展为启动名义段、终结下降、RTL/HOME、动态时序或地形报告。原报告实际阈值与启动名义候选来源不同，不能互换；下方是本捕获的独立联合静态分析。\n空列表 / 缺省 / 旧记录未知不表示没有禁飞区，也不表示已加载权威空域。").arg(root.yes(root.airspace.available)).arg(root.airspaceInputText(root.airspace.inputState)).arg(root.number(root.airspace.zoneCount)).arg(root.number(root.airspace.minimumSeparationMeters)).arg(root.text(root.airspace.thresholdSource))}
         }
@@ -411,25 +411,25 @@ ColumnLayout {
             }
             ColumnLayout {
                 Layout.fillWidth:true;visible:root.detailsExpanded;spacing:root.pad
-                QGCComboBox{ id:detailsChoice;Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;Accessible.name:qsTr("选择原始字段类别");model:[qsTr("本机动作与原时序"),qsTr("全部限制与未编码要求"),qsTr("原规划空域报告及依据"),qsTr("归档禁飞区原值（不是认证几何）"),qsTr("所选点时序与路线元数据"),qsTr("本次联合静态报告")];currentIndex:root.detailsMode;onActivated:{root.detailsMode=index;currentIndex=Qt.binding(function(){return root.detailsMode})};onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)
+                QGCComboBox{ id:detailsChoice;Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;Accessible.name:qsTr("选择原始字段类别");model:[qsTr("本机动作与原时序"),qsTr("全部限制与未编码要求"),qsTr("原规划空域报告及依据"),qsTr("归档禁飞区原值（不是认证几何）"),qsTr("所选点时序与路线元数据"),qsTr("本次联合静态报告")];currentIndex:root.detailsMode;onActivated:{root.detailsMode=index;currentIndex=Qt.binding(function(){return root.detailsMode})}onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)
                     Rectangle{anchors.fill:parent;color:"transparent";border.width:detailsChoice.activeFocus?2:0;border.color:qgcPal.buttonHighlight}
                 }
                 QGCLabel{Layout.fillWidth:true;visible:root.detailsMode!==5&&!root.available;textFormat:Text.PlainText;wrapMode:Text.Wrap;color:qgcPal.warningText;text:qsTr("该类原计划字段当前不可展示，不从联合报告反推。可切换第六类查看本次联合结果或不可用原因。")}
                 QGCLabel{Layout.fillWidth:true;textFormat:Text.PlainText;wrapMode:Text.Wrap;text:qsTr("字段路径 $%1 · 第 %2 / %3 页；本层 %4 项。一次最多 8 项，不常驻展开整份报告。原字段名与值不等于已通过；未知/null 保持未知。").arg(root.detailsPath.length?" / "+root.detailsPath.join(" / "):"").arg(Math.min(root.detailsPage,root.detailPageCount-1)+1).arg(root.detailPageCount).arg(root.detailCount)}
-                QGCButton{Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;text:qsTr("返回上一层字段");enabled:root.detailsPath.length>0;opacity:enabled?1:0.45;onClicked:{root.detailsPath=root.detailsPath.slice(0,-1);root.detailsPage=0;root.afterLayout(this)};onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)}
+                QGCButton{Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;text:qsTr("返回上一层字段");enabled:root.detailsPath.length>0;opacity:enabled?1:0.45;onClicked:{root.detailsPath=root.detailsPath.slice(0,-1);root.detailsPage=0;root.afterLayout(this)}onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)}
                 Repeater {
                     model:root.detailRows
                     ColumnLayout {
                         Layout.fillWidth:true
                         readonly property var valueRow:modelData
                         QGCLabel{Layout.fillWidth:true;textFormat:Text.PlainText;wrapMode:Text.Wrap;text:valueRow.label+"\n"+root.detailSummary(valueRow.value)}
-                        QGCButton{Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;visible:valueRow.nested;focusPolicy:Qt.StrongFocus;text:qsTr("查看此字段下一层");onClicked:{root.detailsPath=root.detailsPath.concat([valueRow.key]);root.detailsPage=0;detailsChoice.forceActiveFocus();root.afterLayout(detailsChoice)};onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)}
+                        QGCButton{Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;visible:valueRow.nested;focusPolicy:Qt.StrongFocus;text:qsTr("查看此字段下一层");onClicked:{root.detailsPath=root.detailsPath.concat([valueRow.key]);root.detailsPage=0;detailsChoice.forceActiveFocus();root.afterLayout(detailsChoice)}onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)}
                     }
                 }
                 RowLayout {
                     Layout.fillWidth:true;spacing:root.pad
-                    QGCButton{Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;text:qsTr("上一页字段");enabled:root.detailsPage>0;opacity:enabled?1:0.45;onClicked:{root.detailsPage-=1;root.afterLayout(this)};onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)}
-                    QGCButton{Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;text:qsTr("下一页字段");enabled:root.detailsPage+1<root.detailPageCount;opacity:enabled?1:0.45;onClicked:{root.detailsPage+=1;root.afterLayout(this)};onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)}
+                    QGCButton{Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;text:qsTr("上一页字段");enabled:root.detailsPage>0;opacity:enabled?1:0.45;onClicked:{root.detailsPage-=1;root.afterLayout(this)}onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)}
+                    QGCButton{Layout.fillWidth:true;Layout.minimumHeight:root.rowHeight;focusPolicy:Qt.StrongFocus;text:qsTr("下一页字段");enabled:root.detailsPage+1<root.detailPageCount;opacity:enabled?1:0.45;onClicked:{root.detailsPage+=1;root.afterLayout(this)}onActiveFocusChanged:if(activeFocus)root.focusVisibilityRequested(this)}
                 }
             }
         }
